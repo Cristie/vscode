@@ -13,7 +13,7 @@ export declare class Promise<T = any, TProgress = any> {
 			resolve: (value: T | PromiseLike<T>) => void,
 			reject: (reason: any) => void,
 			progress: (progress: TProgress) => void) => void,
-			oncancel?: () => void);
+		oncancel?: () => void);
 
 	public then<TResult1 = T, TResult2 = never>(
 		onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
@@ -29,7 +29,8 @@ export declare class Promise<T = any, TProgress = any> {
 
 	public static as(value: null): Promise<null>;
 	public static as(value: undefined): Promise<undefined>;
-	public static as<T, TPromise extends PromiseLike<T>>(value: TPromise): TPromise;
+	public static as<T>(value: PromiseLike<T>): PromiseLike<T>;
+	public static as<T, SomePromise extends PromiseLike<T>>(value: SomePromise): SomePromise;
 	public static as<T>(value: T): Promise<T>;
 
 	public static is(value: any): value is PromiseLike<any>;
@@ -38,7 +39,6 @@ export declare class Promise<T = any, TProgress = any> {
 
 	public static join<T1, T2>(promises: [T1 | PromiseLike<T1>, T2 | PromiseLike<T2>]): Promise<[T1, T2]>;
 	public static join<T>(promises: (T | PromiseLike<T>)[]): Promise<T[]>;
-	public static join<T>(promises: { [n: string]: T | PromiseLike<T> }): Promise<{ [n: string]: T }>;
 
 	public static any<T>(promises: (T | PromiseLike<T>)[]): Promise<{ key: string; value: Promise<T>; }>;
 

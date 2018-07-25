@@ -3,95 +3,134 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { SpectronApplication } from '../../spectron/application';
 import { Viewlet } from '../workbench/viewlet';
+import { Code } from '../../vscode/code';
+
+const VIEWLET = 'div[id="workbench.view.search"] .search-view';
+const INPUT = `${VIEWLET} .search-widget .search-container .monaco-inputbox input`;
+const INCLUDE_INPUT = `${VIEWLET} .query-details .file-types.includes .monaco-inputbox input`;
+const FILE_MATCH = filename => `${VIEWLET} .results .filematch[data-resource$="${filename}"]`;
+
+async function retry(setup: () => Promise<any>, attempt: () => Promise<any>) {
+	let count = 0;
+	while (true) {
+		await setup();
+
+		try {
+			await attempt();
+			return;
+		} catch (err) {
+			if (++count > 5) {
+				throw err;
+			}
+		}
+	}
+}
 
 export class Search extends Viewlet {
 
-	static SEARCH_VIEWLET_XPATH = 'div[id="workbench.view.search"] .search-viewlet';
-
-	constructor(spectron: SpectronApplication) {
-		super(spectron);
+	constructor(code: Code) {
+		super(code);
 	}
 
-	public async openSearchViewlet(): Promise<any> {
-		if (!await this.isSearchViewletFocused()) {
-			await this.spectron.command('workbench.view.search');
-			await this.spectron.client.waitForElement(`${Search.SEARCH_VIEWLET_XPATH} .search-widget .search-container .monaco-inputbox.synthetic-focus input`);
+	async openSearchViewlet(): Promise<any> {
+		if (process.platform === 'darwin') {
+			await this.code.dispatchKeybinding('cmd+shift+f');
+		} else {
+			await this.code.dispatchKeybinding('ctrl+shift+f');
 		}
+
+		await this.waitForInputFocus(INPUT);
 	}
 
-	public async isSearchViewletFocused(): Promise<boolean> {
-		const element = await this.spectron.client.element(`${Search.SEARCH_VIEWLET_XPATH} .search-widget .search-container .monaco-inputbox.synthetic-focus input`);
-		return !!element;
-	}
-
-	public async searchFor(text: string): Promise<void> {
-		const searchBoxSelector = `${Search.SEARCH_VIEWLET_XPATH} .search-widget .search-container .monaco-inputbox input`;
-
-		await this.spectron.client.clearElement(searchBoxSelector);
-		await this.spectron.client.click(searchBoxSelector);
-		await this.spectron.client.element(`${Search.SEARCH_VIEWLET_XPATH} .search-widget .search-container .monaco-inputbox.synthetic-focus input`);
-
-		await this.spectron.client.keys(text);
-
+	async searchFor(text: string): Promise<void> {
+		await this.waitForInputFocus(INPUT);
+		await this.code.waitForSetValue(INPUT, text);
 		await this.submitSearch();
 	}
 
-	public async submitSearch(): Promise<void> {
-		await this.spectron.client.click(`${Search.SEARCH_VIEWLET_XPATH} .search-widget .search-container .monaco-inputbox input`);
-		await this.spectron.client.element(`${Search.SEARCH_VIEWLET_XPATH} .search-widget .search-container .monaco-inputbox.synthetic-focus input`);
-		await this.spectron.client.keys(['NULL', 'Enter', 'NULL'], false);
-		await this.spectron.client.element(`${Search.SEARCH_VIEWLET_XPATH} .messages[aria-hidden="false"]`);
+	async submitSearch(): Promise<void> {
+		await this.waitForInputFocus(INPUT);
+
+		await this.code.dispatchKeybinding('enter');
+		await this.code.waitForElement(`${VIEWLET} .messages[aria-hidden="false"]`);
 	}
 
-	public async setFilesToIncludeTextAndSearch(text: string): Promise<void> {
-		await this.spectron.client.click(`${Search.SEARCH_VIEWLET_XPATH} .query-details .monaco-inputbox input[aria-label="Search Include Patterns"]`);
-		await this.spectron.client.element(`${Search.SEARCH_VIEWLET_XPATH} .query-details .monaco-inputbox.synthetic-focus input[aria-label="Search Include Patterns"]`);
-		await this.spectron.client.clearElement(`${Search.SEARCH_VIEWLET_XPATH} .query-details .monaco-inputbox.synthetic-focus input[aria-label="Search Include Patterns"]`);
+	async setFilesToIncludeText(text: string): Promise<void> {
+		await this.waitForInputFocus(INCLUDE_INPUT);
+		await this.code.waitForSetValue(INCLUDE_INPUT, text || '');
+	}
 
-		if (text) {
-			await this.spectron.client.keys(text);
+	async showQueryDetails(): Promise<void> {
+		await this.code.waitAndClick(`${VIEWLET} .query-details .more`);
+	}
+
+	async hideQueryDetails(): Promise<void> {
+		await this.code.waitAndClick(`${VIEWLET} .query-details.more .more`);
+	}
+
+	async removeFileMatch(filename: string): Promise<void> {
+		const fileMatch = FILE_MATCH(filename);
+
+		await retry(
+			() => this.code.waitAndClick(fileMatch),
+			() => this.code.waitForElement(`${fileMatch} .action-label.icon.action-remove`, el => !!el && el.top > 0 && el.left > 0, 10)
+		);
+
+		// ¯\_(ツ)_/¯
+		await new Promise(c => setTimeout(c, 500));
+		await this.code.waitAndClick(`${fileMatch} .action-label.icon.action-remove`);
+		await this.code.waitForElement(fileMatch, el => !el);
+	}
+
+	async expandReplace(): Promise<void> {
+		await this.code.waitAndClick(`${VIEWLET} .search-widget .monaco-button.toggle-replace-button.collapse`);
+	}
+
+	async collapseReplace(): Promise<void> {
+		await this.code.waitAndClick(`${VIEWLET} .search-widget .monaco-button.toggle-replace-button.expand`);
+	}
+
+	async setReplaceText(text: string): Promise<void> {
+		await this.code.waitForSetValue(`${VIEWLET} .search-widget .replace-container .monaco-inputbox input[title="Replace"]`, text);
+	}
+
+	async replaceFileMatch(filename: string): Promise<void> {
+		const fileMatch = FILE_MATCH(filename);
+
+		await retry(
+			() => this.code.waitAndClick(fileMatch),
+			() => this.code.waitForElement(`${fileMatch} .action-label.icon.action-replace-all`, el => !!el && el.top > 0 && el.left > 0, 10)
+		);
+
+		// ¯\_(ツ)_/¯
+		await new Promise(c => setTimeout(c, 500));
+		await this.code.waitAndClick(`${fileMatch} .action-label.icon.action-replace-all`);
+	}
+
+	async waitForResultText(text: string): Promise<void> {
+		await this.code.waitForTextContent(`${VIEWLET} .messages[aria-hidden="false"] .message>p`, text);
+	}
+
+	async waitForNoResultText(): Promise<void> {
+		await this.code.waitForElement(`${VIEWLET} .messages[aria-hidden="false"] .message>p`, el => !el);
+	}
+
+	private async waitForInputFocus(selector: string): Promise<void> {
+		let retries = 0;
+
+		// other parts of code might steal focus away from input boxes :(
+		while (retries < 5) {
+			await this.code.waitAndClick(INPUT, 2, 2);
+
+			try {
+				await this.code.waitForActiveElement(INPUT, 10);
+				break;
+			} catch (err) {
+				if (++retries > 5) {
+					throw err;
+				}
+			}
 		}
-	}
-
-	public async showQueryDetails(): Promise<void> {
-		if (!await this.areDetailsVisible()) {
-			await this.spectron.client.waitAndClick(`${Search.SEARCH_VIEWLET_XPATH} .query-details .more`);
-		}
-	}
-
-	public async hideQueryDetails(): Promise<void> {
-		if (await this.areDetailsVisible()) {
-			await this.spectron.client.waitAndClick(`${Search.SEARCH_VIEWLET_XPATH} .query-details.more .more`);
-		}
-	}
-
-	public async areDetailsVisible(): Promise<boolean> {
-		const element = await this.spectron.client.element(`${Search.SEARCH_VIEWLET_XPATH} .query-details.more`);
-		return !!element;
-	}
-
-	public async removeFileMatch(index: number): Promise<void> {
-		await this.spectron.client.waitAndmoveToObject(`${Search.SEARCH_VIEWLET_XPATH} .results .monaco-tree-rows>:nth-child(${index}) .filematch`);
-		const file = await this.spectron.client.waitForText(`${Search.SEARCH_VIEWLET_XPATH} .results .monaco-tree-rows>:nth-child(${index}) .filematch a.label-name`);
-		await this.spectron.client.click(`${Search.SEARCH_VIEWLET_XPATH} .results .monaco-tree-rows>:nth-child(${index}) .filematch .action-label.icon.action-remove`);
-		await this.spectron.client.waitForText(`${Search.SEARCH_VIEWLET_XPATH} .results .monaco-tree-rows>:nth-child(${index}) .filematch a.label-name`, void 0, result => result !== file);
-	}
-
-	public async setReplaceText(text: string): Promise<void> {
-		await this.spectron.client.waitAndClick(`${Search.SEARCH_VIEWLET_XPATH} .search-widget .monaco-button.toggle-replace-button.collapse`);
-		await this.spectron.client.waitAndClick(`${Search.SEARCH_VIEWLET_XPATH} .search-widget .replace-container .monaco-inputbox input[title="Replace"]`);
-		await this.spectron.client.element(`${Search.SEARCH_VIEWLET_XPATH} .search-widget .replace-container .monaco-inputbox.synthetic-focus input[title="Replace"]`);
-		await this.spectron.client.setValue(`${Search.SEARCH_VIEWLET_XPATH} .search-widget .replace-container .monaco-inputbox.synthetic-focus input[title="Replace"]`, text);
-	}
-
-	public async replaceFileMatch(index: number): Promise<void> {
-		await this.spectron.client.waitAndmoveToObject(`${Search.SEARCH_VIEWLET_XPATH} .results .monaco-tree-rows>:nth-child(${index}) .filematch`);
-		await this.spectron.client.click(`${Search.SEARCH_VIEWLET_XPATH} .results .monaco-tree-rows>:nth-child(${index}) .filematch .action-label.icon.action-replace-all`);
-	}
-
-	public async waitForResultText(text: string): Promise<void> {
-		await this.spectron.client.waitForText(`${Search.SEARCH_VIEWLET_XPATH} .messages[aria-hidden="false"] .message>p`, text);
 	}
 }

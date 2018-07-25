@@ -5,8 +5,7 @@
 'use strict';
 
 import { localize } from 'vs/nls';
-import { IWorkbenchEditorService } from 'vs/workbench/services/editor/common/editorService';
-import { Position } from 'vs/platform/editor/common/editor';
+import { IEditorService } from 'vs/workbench/services/editor/common/editorService';
 import { Action } from 'vs/base/common/actions';
 import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
 import { TPromise } from 'vs/base/common/winjs.base';
@@ -26,13 +25,13 @@ const inputOptions: WalkThroughInputOptions = {
 
 export class EditorWalkThroughAction extends Action {
 
-	public static ID = 'workbench.action.showInteractivePlayground';
-	public static LABEL = localize('editorWalkThrough', "Interactive Playground");
+	public static readonly ID = 'workbench.action.showInteractivePlayground';
+	public static readonly LABEL = localize('editorWalkThrough', "Interactive Playground");
 
 	constructor(
 		id: string,
 		label: string,
-		@IWorkbenchEditorService private editorService: IWorkbenchEditorService,
+		@IEditorService private editorService: IEditorService,
 		@IInstantiationService private instantiationService: IInstantiationService
 	) {
 		super(id, label);
@@ -40,14 +39,14 @@ export class EditorWalkThroughAction extends Action {
 
 	public run(): TPromise<void> {
 		const input = this.instantiationService.createInstance(WalkThroughInput, inputOptions);
-		return this.editorService.openEditor(input, { pinned: true }, Position.ONE)
+		return this.editorService.openEditor(input, { pinned: true })
 			.then(() => void (0));
 	}
 }
 
 export class EditorWalkThroughInputFactory implements IEditorInputFactory {
 
-	static ID = typeId;
+	static readonly ID = typeId;
 
 	public serialize(editorInput: EditorInput): string {
 		return '{}';

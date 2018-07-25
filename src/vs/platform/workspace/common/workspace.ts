@@ -8,9 +8,9 @@ import URI from 'vs/base/common/uri';
 import * as paths from 'vs/base/common/paths';
 import * as resources from 'vs/base/common/resources';
 import { createDecorator } from 'vs/platform/instantiation/common/instantiation';
-import { StringTrieMap } from 'vs/base/common/map';
-import Event from 'vs/base/common/event';
-import { ISingleFolderWorkspaceIdentifier, IWorkspaceIdentifier, IStoredWorkspaceFolder, isRawFileWorkspaceFolder, isRawUriWorkspaceFolder } from 'vs/platform/workspaces/common/workspaces';
+import { TernarySearchTree } from 'vs/base/common/map';
+import { Event } from 'vs/base/common/event';
+import { IWorkspaceIdentifier, IStoredWorkspaceFolder, isRawFileWorkspaceFolder, isRawUriWorkspaceFolder, ISingleFolderWorkspaceIdentifier } from 'vs/platform/workspaces/common/workspaces';
 import { coalesce, distinct } from 'vs/base/common/arrays';
 import { isLinux } from 'vs/base/common/platform';
 
@@ -32,21 +32,6 @@ export interface IWorkspaceContextService {
 	_serviceBrand: any;
 
 	/**
-	 * Provides access to the workspace object the platform is running with. This may be null if the workbench was opened
-	 * without workspace (empty);
-	 */
-	getWorkspace(): IWorkspace;
-
-	/**
-	 * Return the state of the workbench.
-	 *
-	 * WorkbenchState.EMPTY - if the workbench was opened with empty window or file
-	 * WorkbenchState.FOLDER - if the workbench was opened with a folder
-	 * WorkbenchState.WORKSPACE - if the workbench was opened with a workspace
-	 */
-	getWorkbenchState(): WorkbenchState;
-
-	/**
 	 * An event which fires on workbench state changes.
 	 */
 	onDidChangeWorkbenchState: Event<WorkbenchState>;
@@ -60,6 +45,20 @@ export interface IWorkspaceContextService {
 	 * An event which fires on workspace folders change.
 	 */
 	onDidChangeWorkspaceFolders: Event<IWorkspaceFoldersChangeEvent>;
+
+	/**
+	 * Provides access to the workspace object the platform is running with.
+	 */
+	getWorkspace(): IWorkspace;
+
+	/**
+	 * Return the state of the workbench.
+	 *
+	 * WorkbenchState.EMPTY - if the workbench was opened with empty window or file
+	 * WorkbenchState.FOLDER - if the workbench was opened with a folder
+	 * WorkbenchState.WORKSPACE - if the workbench was opened with a workspace
+	 */
+	getWorkbenchState(): WorkbenchState;
 
 	/**
 	 * Returns the folder for the given resource from the workspace.
@@ -76,6 +75,15 @@ export interface IWorkspaceContextService {
 	 * Returns if the provided resource is inside the workspace or not.
 	 */
 	isInsideWorkspace(resource: URI): boolean;
+}
+
+export namespace IWorkspace {
+	export function isIWorkspace(thing: any): thing is IWorkspace {
+		return thing && typeof thing === 'object'
+			&& typeof (thing as IWorkspace).id === 'string'
+			&& typeof (thing as IWorkspace).name === 'string'
+			&& Array.isArray((thing as IWorkspace).folders);
+	}
 }
 
 export interface IWorkspace {
@@ -119,6 +127,15 @@ export interface IWorkspaceFolderData {
 	readonly index: number;
 }
 
+export namespace IWorkspaceFolder {
+	export function isIWorkspaceFolder(thing: any): thing is IWorkspaceFolder {
+		return thing && typeof thing === 'object'
+			&& URI.isUri((thing as IWorkspaceFolder).uri)
+			&& typeof (thing as IWorkspaceFolder).name === 'string'
+			&& typeof (thing as IWorkspaceFolder).toResource === 'function';
+	}
+}
+
 export interface IWorkspaceFolder extends IWorkspaceFolderData {
 
 	/**
@@ -129,7 +146,7 @@ export interface IWorkspaceFolder extends IWorkspaceFolderData {
 
 export class Workspace implements IWorkspace {
 
-	private _foldersMap: StringTrieMap<WorkspaceFolder> = new StringTrieMap<WorkspaceFolder>();
+	private _foldersMap: TernarySearchTree<WorkspaceFolder> = TernarySearchTree.forPaths<WorkspaceFolder>();
 	private _folders: WorkspaceFolder[];
 
 	constructor(
@@ -142,7 +159,7 @@ export class Workspace implements IWorkspace {
 		this.folders = folders;
 	}
 
-	public update(workspace: Workspace) {
+	update(workspace: Workspace) {
 		this._id = workspace.id;
 		this._name = workspace.name;
 		this._configuration = workspace.configuration;
@@ -150,40 +167,40 @@ export class Workspace implements IWorkspace {
 		this.folders = workspace.folders;
 	}
 
-	public get folders(): WorkspaceFolder[] {
+	get folders(): WorkspaceFolder[] {
 		return this._folders;
 	}
 
-	public set folders(folders: WorkspaceFolder[]) {
+	set folders(folders: WorkspaceFolder[]) {
 		this._folders = folders;
 		this.updateFoldersMap();
 	}
 
-	public get id(): string {
+	get id(): string {
 		return this._id;
 	}
 
-	public get ctime(): number {
+	get ctime(): number {
 		return this._ctime;
 	}
 
-	public get name(): string {
+	get name(): string {
 		return this._name;
 	}
 
-	public set name(name: string) {
+	set name(name: string) {
 		this._name = name;
 	}
 
-	public get configuration(): URI {
+	get configuration(): URI {
 		return this._configuration;
 	}
 
-	public set configuration(configuration: URI) {
+	set configuration(configuration: URI) {
 		this._configuration = configuration;
 	}
 
-	public getFolder(resource: URI): IWorkspaceFolder {
+	getFolder(resource: URI): IWorkspaceFolder {
 		if (!resource) {
 			return null;
 		}
@@ -192,22 +209,22 @@ export class Workspace implements IWorkspace {
 	}
 
 	private updateFoldersMap(): void {
-		this._foldersMap = new StringTrieMap<WorkspaceFolder>();
+		this._foldersMap = TernarySearchTree.forPaths<WorkspaceFolder>();
 		for (const folder of this.folders) {
-			this._foldersMap.insert(folder.uri.toString(), folder);
+			this._foldersMap.set(folder.uri.toString(), folder);
 		}
 	}
 
-	public toJSON(): IWorkspace {
-		return { id: this.id, folders: this.folders, name: this.name };
+	toJSON(): IWorkspace {
+		return { id: this.id, folders: this.folders, name: this.name, configuration: this.configuration };
 	}
 }
 
 export class WorkspaceFolder implements IWorkspaceFolder {
 
 	readonly uri: URI;
-	readonly name: string;
-	readonly index: number;
+	name: string;
+	index: number;
 
 	constructor(data: IWorkspaceFolderData,
 		readonly raw?: IStoredWorkspaceFolder) {
@@ -239,6 +256,10 @@ function parseWorkspaceFolders(configuredFolders: IStoredWorkspaceFolder[], rela
 		} else if (isRawUriWorkspaceFolder(configuredFolder)) {
 			try {
 				uri = URI.parse(configuredFolder.uri);
+				// this makes sure all workspace folder are absolute
+				if (uri.path[0] !== '/') {
+					uri = uri.with({ path: '/' + uri.path });
+				}
 			} catch (e) {
 				console.warn(e);
 				// ignore

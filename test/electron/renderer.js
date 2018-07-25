@@ -12,6 +12,12 @@ const glob = require('glob');
 const minimatch = require('minimatch');
 const istanbul = require('istanbul');
 const i_remap = require('remap-istanbul/lib/remap');
+const util = require('util');
+
+// Disabled custom inspect. See #38847
+if (util.inspect && util.inspect['defaultOptions']) {
+	util.inspect['defaultOptions'].customInspect = false;
+}
 
 let _tests_glob = '**/test/**/*.test.js';
 let loader;
@@ -181,6 +187,9 @@ function loadTests(opts) {
 
 function serializeSuite(suite) {
 	return {
+		root: suite.root,
+		suites: suite.suites.map(serializeSuite),
+		tests: suite.tests.map(serializeRunnable),
 		title: suite.title,
 		fullTitle: suite.fullTitle(),
 		timeout: suite.timeout(),
@@ -261,5 +270,5 @@ function runTests(opts) {
 
 ipcRenderer.on('run', (e, opts) => {
 	initLoader(opts);
-	runTests(opts).catch(err => console.error(err));
+	runTests(opts).catch(err => console.error(typeof err === 'string' ? err : JSON.stringify(err)));
 });

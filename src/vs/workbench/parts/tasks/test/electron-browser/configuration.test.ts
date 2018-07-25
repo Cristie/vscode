@@ -11,7 +11,7 @@ import * as UUID from 'vs/base/common/uuid';
 
 import * as Platform from 'vs/base/common/platform';
 import { ValidationStatus } from 'vs/base/common/parsers';
-import { ProblemMatcher, FileLocationKind, ProblemPattern, ApplyToKind } from 'vs/platform/markers/common/problemMatcher';
+import { ProblemMatcher, FileLocationKind, ProblemPattern, ApplyToKind } from 'vs/workbench/parts/tasks/common/problemMatcher';
 import { IWorkspaceFolder, WorkspaceFolder } from 'vs/platform/workspace/common/workspace';
 
 import * as Tasks from 'vs/workbench/parts/tasks/common/tasks';
@@ -54,11 +54,6 @@ class ProblemReporter implements IProblemReporter {
 		this.receivedMessage = true;
 		this.lastMessage = message;
 	}
-
-	public clearOutput(): void {
-		this.receivedMessage = false;
-		this.lastMessage = undefined;
-	}
 }
 
 class ConfiguationBuilder {
@@ -90,7 +85,7 @@ class PresentationBuilder {
 	public result: Tasks.PresentationOptions;
 
 	constructor(public parent: CommandConfigurationBuilder) {
-		this.result = { echo: false, reveal: Tasks.RevealKind.Always, focus: false, panel: Tasks.PanelKind.Shared };
+		this.result = { echo: false, reveal: Tasks.RevealKind.Always, focus: false, panel: Tasks.PanelKind.Shared, showReuseMessage: true };
 	}
 
 	public echo(value: boolean): PresentationBuilder {
@@ -110,6 +105,11 @@ class PresentationBuilder {
 
 	public instance(value: Tasks.PanelKind): PresentationBuilder {
 		this.result.panel = value;
+		return this;
+	}
+
+	public showReuseMessage(value: boolean): PresentationBuilder {
+		this.result.showReuseMessage = value;
 		return this;
 	}
 
@@ -193,7 +193,8 @@ class CustomTaskBuilder {
 			command: this.commandBuilder.result,
 			isBackground: false,
 			promptOnClose: true,
-			problemMatchers: []
+			problemMatchers: [],
+			hasDefinedMatchers: false
 		};
 	}
 
@@ -240,7 +241,7 @@ class CustomTaskBuilder {
 
 class ProblemMatcherBuilder {
 
-	public static DEFAULT_UUID = UUID.generateUuid();
+	public static readonly DEFAULT_UUID = UUID.generateUuid();
 
 	public result: ProblemMatcher;
 
@@ -355,7 +356,7 @@ class PatternBuilder {
 
 function testDefaultProblemMatcher(external: ExternalTaskRunnerConfiguration, resolved: number) {
 	let reporter = new ProblemReporter();
-	let result = parse(workspaceFolder, external, reporter);
+	let result = parse(workspaceFolder, Platform.platform, external, reporter);
 	assert.ok(!reporter.receivedMessage);
 	assert.strictEqual(result.custom.length, 1);
 	let task = result.custom[0];
@@ -366,7 +367,7 @@ function testDefaultProblemMatcher(external: ExternalTaskRunnerConfiguration, re
 function testConfiguration(external: ExternalTaskRunnerConfiguration, builder: ConfiguationBuilder): void {
 	builder.done();
 	let reporter = new ProblemReporter();
-	let result = parse(workspaceFolder, external, reporter);
+	let result = parse(workspaceFolder, Platform.platform, external, reporter);
 	if (reporter.receivedMessage) {
 		assert.ok(false, reporter.lastMessage);
 	}

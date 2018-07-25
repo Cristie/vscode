@@ -5,27 +5,39 @@
 'use strict';
 
 import * as nls from 'vs/nls';
-import { ICommonCodeEditor } from 'vs/editor/common/editorCommon';
-import { editorAction, ServicesAccessor, EditorAction } from 'vs/editor/common/editorCommonExtensions';
-import { IConfigurationEditingService, ConfigurationTarget } from 'vs/workbench/services/configuration/common/configurationEditing';
+import { IConfigurationService, ConfigurationTarget } from 'vs/platform/configuration/common/configuration';
+import { Registry } from 'vs/platform/registry/common/platform';
+import { IWorkbenchActionRegistry, Extensions as ActionExtensions } from 'vs/workbench/common/actions';
+import { Action } from 'vs/base/common/actions';
+import { TPromise } from 'vs/base/common/winjs.base';
+import { SyncActionDescriptor, MenuRegistry, MenuId } from 'vs/platform/actions/common/actions';
 
-@editorAction
-export class ToggleMinimapAction extends EditorAction {
+export class ToggleMinimapAction extends Action {
+	public static readonly ID = 'editor.action.toggleMinimap';
+	public static readonly LABEL = nls.localize('toggleMinimap', "View: Toggle Minimap");
 
-	constructor() {
-		super({
-			id: 'editor.action.toggleMinimap',
-			label: nls.localize('toggleMinimap', "View: Toggle Minimap"),
-			alias: 'View: Toggle Minimap',
-			precondition: null
-		});
+	constructor(
+		id: string,
+		label: string,
+		@IConfigurationService private readonly _configurationService: IConfigurationService
+	) {
+		super(id, label);
 	}
 
-	public run(accessor: ServicesAccessor, editor: ICommonCodeEditor): void {
-		const configurationEditingService = accessor.get(IConfigurationEditingService);
-
-		const newValue = !editor.getConfiguration().viewInfo.minimap.enabled;
-
-		configurationEditingService.writeConfiguration(ConfigurationTarget.USER, { key: 'editor.minimap.enabled', value: newValue });
+	public run(): TPromise<any> {
+		const newValue = !this._configurationService.getValue<boolean>('editor.minimap.enabled');
+		return this._configurationService.updateValue('editor.minimap.enabled', newValue, ConfigurationTarget.USER);
 	}
 }
+
+const registry = Registry.as<IWorkbenchActionRegistry>(ActionExtensions.WorkbenchActions);
+registry.registerWorkbenchAction(new SyncActionDescriptor(ToggleMinimapAction, ToggleMinimapAction.ID, ToggleMinimapAction.LABEL), 'View: Toggle Minimap');
+
+MenuRegistry.appendMenuItem(MenuId.MenubarViewMenu, {
+	group: '5_editor',
+	command: {
+		id: ToggleMinimapAction.ID,
+		title: nls.localize({ key: 'miToggleMinimap', comment: ['&& denotes a mnemonic'] }, "Toggle &&Minimap")
+	},
+	order: 2
+});

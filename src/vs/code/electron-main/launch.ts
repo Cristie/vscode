@@ -9,12 +9,17 @@ import { TPromise } from 'vs/base/common/winjs.base';
 import { IChannel } from 'vs/base/parts/ipc/common/ipc';
 import { ILogService } from 'vs/platform/log/common/log';
 import { IURLService } from 'vs/platform/url/common/url';
-import { IProcessEnvironment } from 'vs/base/common/platform';
-import { ParsedArgs } from 'vs/platform/environment/common/environment';
+import { IProcessEnvironment, isMacintosh } from 'vs/base/common/platform';
+import { ParsedArgs, IEnvironmentService } from 'vs/platform/environment/common/environment';
 import { createDecorator } from 'vs/platform/instantiation/common/instantiation';
-import { OpenContext } from 'vs/platform/windows/common/windows';
+import { OpenContext, IWindowSettings } from 'vs/platform/windows/common/windows';
 import { IWindowsMainService, ICodeWindow } from 'vs/platform/windows/electron-main/windows';
 import { whenDeleted } from 'vs/base/node/pfs';
+import { IWorkspacesMainService } from 'vs/platform/workspaces/common/workspaces';
+import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
+import URI, { UriComponents } from 'vs/base/common/uri';
+import { BrowserWindow } from 'electron';
+import { Event } from 'vs/base/common/event';
 
 export const ID = 'launchService';
 export const ILaunchService = createDecorator<ILaunchService>(ID);
@@ -24,15 +29,49 @@ export interface IStartArguments {
 	userEnv: IProcessEnvironment;
 }
 
+export interface IWindowInfo {
+	pid: number;
+	title: string;
+	folderURIs: UriComponents[];
+}
+
+export interface IMainProcessInfo {
+	mainPID: number;
+	mainArguments: string[];
+	windows: IWindowInfo[];
+}
+
+function parseOpenUrl(args: ParsedArgs): URI[] {
+	if (args['open-url'] && args._urls && args._urls.length > 0) {
+		// --open-url must contain -- followed by the url(s)
+		// process.argv is used over args._ as args._ are resolved to file paths at this point
+		return args._urls
+			.map(url => {
+				try {
+					return URI.parse(url);
+				} catch (err) {
+					return null;
+				}
+			})
+			.filter(uri => !!uri);
+	}
+
+	return [];
+}
+
 export interface ILaunchService {
 	_serviceBrand: any;
 	start(args: ParsedArgs, userEnv: IProcessEnvironment): TPromise<void>;
 	getMainProcessId(): TPromise<number>;
+	getMainProcessInfo(): TPromise<IMainProcessInfo>;
+	getLogsPath(): TPromise<string>;
 }
 
 export interface ILaunchChannel extends IChannel {
 	call(command: 'start', arg: IStartArguments): TPromise<void>;
 	call(command: 'get-main-process-id', arg: null): TPromise<any>;
+	call(command: 'get-main-process-info', arg: null): TPromise<any>;
+	call(command: 'get-logs-path', arg: null): TPromise<string>;
 	call(command: string, arg: any): TPromise<any>;
 }
 
@@ -40,7 +79,11 @@ export class LaunchChannel implements ILaunchChannel {
 
 	constructor(private service: ILaunchService) { }
 
-	public call(command: string, arg: any): TPromise<any> {
+	listen<T>(event: string): Event<T> {
+		throw new Error('No event found');
+	}
+
+	call(command: string, arg: any): TPromise<any> {
 		switch (command) {
 			case 'start':
 				const { args, userEnv } = arg as IStartArguments;
@@ -48,6 +91,12 @@ export class LaunchChannel implements ILaunchChannel {
 
 			case 'get-main-process-id':
 				return this.service.getMainProcessId();
+
+			case 'get-main-process-info':
+				return this.service.getMainProcessInfo();
+
+			case 'get-logs-path':
+				return this.service.getLogsPath();
 		}
 
 		return undefined;
@@ -60,12 +109,20 @@ export class LaunchChannelClient implements ILaunchService {
 
 	constructor(private channel: ILaunchChannel) { }
 
-	public start(args: ParsedArgs, userEnv: IProcessEnvironment): TPromise<void> {
+	start(args: ParsedArgs, userEnv: IProcessEnvironment): TPromise<void> {
 		return this.channel.call('start', { args, userEnv });
 	}
 
-	public getMainProcessId(): TPromise<number> {
+	getMainProcessId(): TPromise<number> {
 		return this.channel.call('get-main-process-id', null);
+	}
+
+	getMainProcessInfo(): TPromise<IMainProcessInfo> {
+		return this.channel.call('get-main-process-info', null);
+	}
+
+	getLogsPath(): TPromise<string> {
+		return this.channel.call('get-logs-path', null);
 	}
 }
 
@@ -75,33 +132,91 @@ export class LaunchService implements ILaunchService {
 
 	constructor(
 		@ILogService private logService: ILogService,
-		@IWindowsMainService private windowsService: IWindowsMainService,
-		@IURLService private urlService: IURLService
+		@IWindowsMainService private windowsMainService: IWindowsMainService,
+		@IURLService private urlService: IURLService,
+		@IWorkspacesMainService private workspacesMainService: IWorkspacesMainService,
+		@IEnvironmentService private readonly environmentService: IEnvironmentService,
+		@IConfigurationService private readonly configurationService: IConfigurationService
 	) { }
 
-	public start(args: ParsedArgs, userEnv: IProcessEnvironment): TPromise<void> {
-		this.logService.log('Received data from other instance: ', args, userEnv);
+	start(args: ParsedArgs, userEnv: IProcessEnvironment): TPromise<void> {
+		this.logService.trace('Received data from other instance: ', args, userEnv);
+
+		const urlsToOpen = parseOpenUrl(args);
 
 		// Check early for open-url which is handled in URL service
-		const openUrlArg = args['open-url'] || [];
-		const openUrl = typeof openUrlArg === 'string' ? [openUrlArg] : openUrlArg;
-		if (openUrl.length > 0) {
-			openUrl.forEach(url => this.urlService.open(url));
+		if (urlsToOpen.length) {
+			let whenWindowReady = TPromise.as<any>(null);
+
+			// Create a window if there is none
+			if (this.windowsMainService.getWindowCount() === 0) {
+				const window = this.windowsMainService.openNewWindow(OpenContext.DESKTOP)[0];
+				whenWindowReady = window.ready();
+			}
+
+			// Make sure a window is open, ready to receive the url event
+			whenWindowReady.then(() => {
+				for (const url of urlsToOpen) {
+					this.urlService.open(url);
+				}
+			});
 
 			return TPromise.as(null);
 		}
 
 		// Otherwise handle in windows service
+		return this.startOpenWindow(args, userEnv);
+	}
+
+	private startOpenWindow(args: ParsedArgs, userEnv: IProcessEnvironment): TPromise<void> {
 		const context = !!userEnv['VSCODE_CLI'] ? OpenContext.CLI : OpenContext.DESKTOP;
 		let usedWindows: ICodeWindow[];
+
+		// Special case extension development
 		if (!!args.extensionDevelopmentPath) {
-			this.windowsService.openExtensionDevelopmentHostWindow({ context, cli: args, userEnv });
-		} else if (args._.length === 0 && (args['new-window'] || args['unity-launch'])) {
-			usedWindows = this.windowsService.open({ context, cli: args, userEnv, forceNewWindow: true, forceEmpty: true });
-		} else if (args._.length === 0) {
-			usedWindows = [this.windowsService.focusLastActive(args, context)];
-		} else {
-			usedWindows = this.windowsService.open({
+			this.windowsMainService.openExtensionDevelopmentHostWindow({ context, cli: args, userEnv });
+		}
+
+		// Start without file/folder arguments
+		else if (args._.length === 0 && (args['folder-uri'] || []).length === 0) {
+			let openNewWindow = false;
+
+			// Force new window
+			if (args['new-window'] || args['unity-launch']) {
+				openNewWindow = true;
+			}
+
+			// Force reuse window
+			else if (args['reuse-window']) {
+				openNewWindow = false;
+			}
+
+			// Otherwise check for settings
+			else {
+				const windowConfig = this.configurationService.getValue<IWindowSettings>('window');
+				const openWithoutArgumentsInNewWindowConfig = (windowConfig && windowConfig.openWithoutArgumentsInNewWindow) || 'default' /* default */;
+				switch (openWithoutArgumentsInNewWindowConfig) {
+					case 'on':
+						openNewWindow = true;
+						break;
+					case 'off':
+						openNewWindow = false;
+						break;
+					default:
+						openNewWindow = !isMacintosh; // prefer to restore running instance on macOS
+				}
+			}
+
+			if (openNewWindow) {
+				usedWindows = this.windowsMainService.open({ context, cli: args, userEnv, forceNewWindow: true, forceEmpty: true });
+			} else {
+				usedWindows = [this.windowsMainService.focusLastActive(args, context)];
+			}
+		}
+
+		// Start with file/folder arguments
+		else {
+			usedWindows = this.windowsMainService.open({
 				context,
 				cli: args,
 				userEnv,
@@ -118,7 +233,7 @@ export class LaunchService implements ILaunchService {
 		// In addition, we poll for the wait marker file to be deleted to return.
 		if (args.wait && usedWindows.length === 1 && usedWindows[0]) {
 			return TPromise.any([
-				this.windowsService.waitForWindowCloseOrLoad(usedWindows[0].id),
+				this.windowsMainService.waitForWindowCloseOrLoad(usedWindows[0].id),
 				whenDeleted(args.waitMarkerFilePath)
 			]).then(() => void 0, () => void 0);
 		}
@@ -126,9 +241,58 @@ export class LaunchService implements ILaunchService {
 		return TPromise.as(null);
 	}
 
-	public getMainProcessId(): TPromise<number> {
-		this.logService.log('Received request for process ID from other instance.');
+	getMainProcessId(): TPromise<number> {
+		this.logService.trace('Received request for process ID from other instance.');
 
 		return TPromise.as(process.pid);
+	}
+
+	getMainProcessInfo(): TPromise<IMainProcessInfo> {
+		this.logService.trace('Received request for main process info from other instance.');
+
+		const windows: IWindowInfo[] = [];
+		BrowserWindow.getAllWindows().forEach(window => {
+			const codeWindow = this.windowsMainService.getWindowById(window.id);
+			if (codeWindow) {
+				windows.push(this.codeWindowToInfo(codeWindow));
+			} else {
+				windows.push(this.browserWindowToInfo(window));
+			}
+		});
+
+		return TPromise.wrap({
+			mainPID: process.pid,
+			mainArguments: process.argv,
+			windows
+		} as IMainProcessInfo);
+	}
+
+	getLogsPath(): TPromise<string> {
+		this.logService.trace('Received request for logs path from other instance.');
+
+		return TPromise.as(this.environmentService.logsPath);
+	}
+
+	private codeWindowToInfo(window: ICodeWindow): IWindowInfo {
+		const folderURIs: URI[] = [];
+
+		if (window.openedFolderUri) {
+			folderURIs.push(window.openedFolderUri);
+		} else if (window.openedWorkspace) {
+			const rootFolders = this.workspacesMainService.resolveWorkspaceSync(window.openedWorkspace.configPath).folders;
+			rootFolders.forEach(root => {
+				folderURIs.push(root.uri);
+			});
+		}
+
+		return this.browserWindowToInfo(window.win, folderURIs);
+	}
+
+	private browserWindowToInfo(win: BrowserWindow, folderURIs: URI[] = []): IWindowInfo {
+		return {
+			pid: win.webContents.getOSProcessId(),
+			title: win.getTitle(),
+			folderURIs
+		} as IWindowInfo;
 	}
 }

@@ -11,6 +11,10 @@ import { illegalArgument } from 'vs/base/common/errors';
 import * as vscode from 'vscode';
 import { isMarkdownString } from 'vs/base/common/htmlContent';
 import { IRelativePattern } from 'vs/base/common/glob';
+import { relative } from 'path';
+import { startsWith } from 'vs/base/common/strings';
+import { values } from 'vs/base/common/map';
+import { coalesce } from 'vs/base/common/arrays';
 
 export class Disposable {
 
@@ -90,10 +94,10 @@ export class Position {
 
 	constructor(line: number, character: number) {
 		if (line < 0) {
-			throw illegalArgument('line must be positive');
+			throw illegalArgument('line must be non-negative');
 		}
 		if (character < 0) {
-			throw illegalArgument('character must be positive');
+			throw illegalArgument('character must be non-negative');
 		}
 		this._line = line;
 		this._character = character;
@@ -206,7 +210,7 @@ export class Position {
 
 export class Range {
 
-	static isRange(thing: any): thing is Range {
+	static isRange(thing: any): thing is vscode.Range {
 		if (thing instanceof Range) {
 			return true;
 		}
@@ -490,19 +494,45 @@ export class TextEdit {
 	}
 }
 
-export class WorkspaceEdit {
 
-	private _values: [URI, TextEdit[]][] = [];
-	private _index = new Map<string, number>();
+export interface IFileOperationOptions {
+	overwrite?: boolean;
+	ignoreIfExists?: boolean;
+	ignoreIfNotExists?: boolean;
+	recursive?: boolean;
+}
+
+export interface IFileOperation {
+	_type: 1;
+	from: URI;
+	to: URI;
+	options?: IFileOperationOptions;
+}
+
+export interface IFileTextEdit {
+	_type: 2;
+	uri: URI;
+	edit: TextEdit;
+}
+
+export class WorkspaceEdit implements vscode.WorkspaceEdit {
+
+	private _edits = new Array<IFileOperation | IFileTextEdit>();
+
+	renameFile(from: vscode.Uri, to: vscode.Uri, options?: { overwrite?: boolean, ignoreIfExists?: boolean }): void {
+		this._edits.push({ _type: 1, from, to, options });
+	}
+
+	createFile(uri: vscode.Uri, options?: { overwrite?: boolean, ignoreIfExists?: boolean }): void {
+		this._edits.push({ _type: 1, from: undefined, to: uri, options });
+	}
+
+	deleteFile(uri: vscode.Uri, options?: { recursive?: boolean, ignoreIfNotExists?: boolean }): void {
+		this._edits.push({ _type: 1, from: uri, to: undefined, options });
+	}
 
 	replace(uri: URI, range: Range, newText: string): void {
-		let edit = new TextEdit(range, newText);
-		let array = this.get(uri);
-		if (array) {
-			array.push(edit);
-		} else {
-			this.set(uri, [edit]);
-		}
+		this._edits.push({ _type: 2, uri, edit: new TextEdit(range, newText) });
 	}
 
 	insert(resource: URI, position: Position, newText: string): void {
@@ -514,34 +544,80 @@ export class WorkspaceEdit {
 	}
 
 	has(uri: URI): boolean {
-		return this._index.has(uri.toString());
+		for (const edit of this._edits) {
+			if (edit._type === 2 && edit.uri.toString() === uri.toString()) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	set(uri: URI, edits: TextEdit[]): void {
-		const idx = this._index.get(uri.toString());
-		if (typeof idx === 'undefined') {
-			let newLen = this._values.push([uri, edits]);
-			this._index.set(uri.toString(), newLen - 1);
+		if (!edits) {
+			// remove all text edits for `uri`
+			for (let i = 0; i < this._edits.length; i++) {
+				const element = this._edits[i];
+				if (element._type === 2 && element.uri.toString() === uri.toString()) {
+					this._edits[i] = undefined;
+				}
+			}
+			this._edits = coalesce(this._edits);
 		} else {
-			this._values[idx][1] = edits;
+			// append edit to the end
+			for (const edit of edits) {
+				if (edit) {
+					this._edits.push({ _type: 2, uri, edit });
+				}
+			}
 		}
 	}
 
 	get(uri: URI): TextEdit[] {
-		let idx = this._index.get(uri.toString());
-		return typeof idx !== 'undefined' && this._values[idx][1];
+		let res: TextEdit[] = [];
+		for (let candidate of this._edits) {
+			if (candidate._type === 2 && candidate.uri.toString() === uri.toString()) {
+				res.push(candidate.edit);
+			}
+		}
+		if (res.length === 0) {
+			return undefined;
+		}
+		return res;
 	}
 
 	entries(): [URI, TextEdit[]][] {
-		return this._values;
+		let textEdits = new Map<string, [URI, TextEdit[]]>();
+		for (let candidate of this._edits) {
+			if (candidate._type === 2) {
+				let textEdit = textEdits.get(candidate.uri.toString());
+				if (!textEdit) {
+					textEdit = [candidate.uri, []];
+					textEdits.set(candidate.uri.toString(), textEdit);
+				}
+				textEdit[1].push(candidate.edit);
+			}
+		}
+		return values(textEdits);
+	}
+
+	_allEntries(): ([URI, TextEdit[]] | [URI, URI, IFileOperationOptions])[] {
+		let res: ([URI, TextEdit[]] | [URI, URI, IFileOperationOptions])[] = [];
+		for (let edit of this._edits) {
+			if (edit._type === 1) {
+				res.push([edit.from, edit.to, edit.options]);
+			} else {
+				res.push([edit.uri, [edit.edit]]);
+			}
+		}
+		return res;
 	}
 
 	get size(): number {
-		return this._values.length;
+		return this.entries().length;
 	}
 
 	toJSON(): any {
-		return this._values;
+		return this.entries();
 	}
 }
 
@@ -627,6 +703,10 @@ export class SnippetString {
 	}
 }
 
+export enum DiagnosticTag {
+	Unnecessary = 1,
+}
+
 export enum DiagnosticSeverity {
 	Hint = 3,
 	Information = 2,
@@ -672,6 +752,27 @@ export class Location {
 	}
 }
 
+export class DiagnosticRelatedInformation {
+
+	static is(thing: any): thing is DiagnosticRelatedInformation {
+		if (!thing) {
+			return false;
+		}
+		return typeof (<DiagnosticRelatedInformation>thing).message === 'string'
+			&& (<DiagnosticRelatedInformation>thing).location
+			&& Range.isRange((<DiagnosticRelatedInformation>thing).location.range)
+			&& URI.isUri((<DiagnosticRelatedInformation>thing).location.uri);
+	}
+
+	location: Location;
+	message: string;
+
+	constructor(location: Location, message: string) {
+		this.location = location;
+		this.message = message;
+	}
+}
+
 export class Diagnostic {
 
 	range: Range;
@@ -679,6 +780,8 @@ export class Diagnostic {
 	source: string;
 	code: string | number;
 	severity: DiagnosticSeverity;
+	relatedInformation: DiagnosticRelatedInformation[];
+	tags?: DiagnosticTag[];
 
 	constructor(range: Range, message: string, severity: DiagnosticSeverity = DiagnosticSeverity.Error) {
 		this.range = range;
@@ -794,7 +897,7 @@ export class SymbolInformation {
 		if (locationOrUri instanceof Location) {
 			this.location = locationOrUri;
 		} else if (rangeOrContainer instanceof Range) {
-			this.location = new Location(<URI>locationOrUri, rangeOrContainer);
+			this.location = new Location(locationOrUri, rangeOrContainer);
 		}
 	}
 
@@ -807,6 +910,78 @@ export class SymbolInformation {
 		};
 	}
 }
+
+export class DocumentSymbol {
+	name: string;
+	detail: string;
+	kind: SymbolKind;
+	range: Range;
+	selectionRange: Range;
+	children: DocumentSymbol[];
+
+	constructor(name: string, detail: string, kind: SymbolKind, range: Range, selectionRange: Range) {
+		this.name = name;
+		this.detail = detail;
+		this.kind = kind;
+		this.range = range;
+		this.selectionRange = selectionRange;
+		this.children = [];
+
+		if (!this.range.contains(this.selectionRange)) {
+			throw new Error('selectionRange must be contained in fullRange');
+		}
+	}
+}
+
+
+export enum CodeActionTrigger {
+	Automatic = 1,
+	Manual = 2,
+}
+
+export class CodeAction {
+	title: string;
+
+	command?: vscode.Command;
+
+	edit?: WorkspaceEdit;
+
+	dianostics?: Diagnostic[];
+
+	kind?: CodeActionKind;
+
+	constructor(title: string, kind?: CodeActionKind) {
+		this.title = title;
+		this.kind = kind;
+	}
+}
+
+
+export class CodeActionKind {
+	private static readonly sep = '.';
+
+	public static readonly Empty = new CodeActionKind('');
+	public static readonly QuickFix = CodeActionKind.Empty.append('quickfix');
+	public static readonly Refactor = CodeActionKind.Empty.append('refactor');
+	public static readonly RefactorExtract = CodeActionKind.Refactor.append('extract');
+	public static readonly RefactorInline = CodeActionKind.Refactor.append('inline');
+	public static readonly RefactorRewrite = CodeActionKind.Refactor.append('rewrite');
+	public static readonly Source = CodeActionKind.Empty.append('source');
+	public static readonly SourceOrganizeImports = CodeActionKind.Source.append('organizeImports');
+
+	constructor(
+		public readonly value: string
+	) { }
+
+	public append(parts: string): CodeActionKind {
+		return new CodeActionKind(this.value ? this.value + CodeActionKind.sep + parts : parts);
+	}
+
+	public contains(other: CodeActionKind): boolean {
+		return this.value === other.value || startsWith(other.value, this.value + CodeActionKind.sep);
+	}
+}
+
 
 export class CodeLens {
 
@@ -841,6 +1016,15 @@ export class MarkdownString {
 
 	appendMarkdown(value: string): MarkdownString {
 		this.value += value;
+		return this;
+	}
+
+	appendCodeblock(code: string, language: string = ''): MarkdownString {
+		this.value += '\n```';
+		this.value += language;
+		this.value += '\n';
+		this.value += code;
+		this.value += '\n```\n';
 		return this;
 	}
 }
@@ -882,7 +1066,8 @@ export class SignatureHelp {
 
 export enum CompletionTriggerKind {
 	Invoke = 0,
-	TriggerCharacter = 1
+	TriggerCharacter = 1,
+	TriggerForIncompleteCompletions = 2
 }
 
 export interface CompletionContext {
@@ -918,7 +1103,7 @@ export enum CompletionItemKind {
 	TypeParameter = 24
 }
 
-export class CompletionItem {
+export class CompletionItem implements vscode.CompletionItem {
 
 	label: string;
 	kind: CompletionItemKind;
@@ -926,6 +1111,7 @@ export class CompletionItem {
 	documentation: string | MarkdownString;
 	sortText: string;
 	filterText: string;
+	preselect: boolean;
 	insertText: string | SnippetString;
 	range: Range;
 	textEdit: TextEdit;
@@ -945,6 +1131,7 @@ export class CompletionItem {
 			documentation: this.documentation,
 			sortText: this.sortText,
 			filterText: this.filterText,
+			preselect: this.preselect,
 			insertText: this.insertText,
 			textEdit: this.textEdit
 		};
@@ -965,9 +1152,16 @@ export class CompletionList {
 
 export enum ViewColumn {
 	Active = -1,
+	Beside = -2,
 	One = 1,
 	Two = 2,
-	Three = 3
+	Three = 3,
+	Four = 4,
+	Five = 5,
+	Six = 6,
+	Seven = 7,
+	Eight = 8,
+	Nine = 9
 }
 
 export enum StatusBarAlignment {
@@ -1103,6 +1297,12 @@ export enum ColorFormat {
 	HSL = 2
 }
 
+export enum SourceControlInputBoxValidationType {
+	Error = 0,
+	Warning = 1,
+	Information = 2
+}
+
 export enum TaskRevealKind {
 	Always = 1,
 
@@ -1122,7 +1322,6 @@ export enum TaskPanelKind {
 export class TaskGroup implements vscode.TaskGroup {
 
 	private _id: string;
-	private _label: string;
 
 	public static Clean: TaskGroup = new TaskGroup('clean', 'Clean');
 
@@ -1132,15 +1331,29 @@ export class TaskGroup implements vscode.TaskGroup {
 
 	public static Test: TaskGroup = new TaskGroup('test', 'Test');
 
-	constructor(id: string, label: string) {
+	public static from(value: string) {
+		switch (value) {
+			case 'clean':
+				return TaskGroup.Clean;
+			case 'build':
+				return TaskGroup.Build;
+			case 'rebuild':
+				return TaskGroup.Rebuild;
+			case 'test':
+				return TaskGroup.Test;
+			default:
+				return undefined;
+		}
+	}
+
+	constructor(id: string, _label: string) {
 		if (typeof id !== 'string') {
 			throw illegalArgument('name');
 		}
-		if (typeof label !== 'string') {
+		if (typeof _label !== 'string') {
 			throw illegalArgument('name');
 		}
 		this._id = id;
-		this._label = label;
 	}
 
 	get id(): string {
@@ -1204,19 +1417,49 @@ export class ProcessExecution implements vscode.ProcessExecution {
 	set options(value: vscode.ProcessExecutionOptions) {
 		this._options = value;
 	}
+
+	public computeId(): string {
+		const hash = crypto.createHash('md5');
+		hash.update('process');
+		if (this._process !== void 0) {
+			hash.update(this._process);
+		}
+		if (this._args && this._args.length > 0) {
+			for (let arg of this._args) {
+				hash.update(arg);
+			}
+		}
+		return hash.digest('hex');
+	}
 }
 
 export class ShellExecution implements vscode.ShellExecution {
 
 	private _commandLine: string;
+	private _command: string | vscode.ShellQuotedString;
+	private _args: (string | vscode.ShellQuotedString)[];
 	private _options: vscode.ShellExecutionOptions;
 
-	constructor(commandLine: string, options?: vscode.ShellExecutionOptions) {
-		if (typeof commandLine !== 'string') {
-			throw illegalArgument('commandLine');
+	constructor(commandLine: string, options?: vscode.ShellExecutionOptions);
+	constructor(command: string | vscode.ShellQuotedString, args: (string | vscode.ShellQuotedString)[], options?: vscode.ShellExecutionOptions);
+	constructor(arg0: string | vscode.ShellQuotedString, arg1?: vscode.ShellExecutionOptions | (string | vscode.ShellQuotedString)[], arg2?: vscode.ShellExecutionOptions) {
+		if (Array.isArray(arg1)) {
+			if (!arg0) {
+				throw illegalArgument('command can\'t be undefined or null');
+			}
+			if (typeof arg0 !== 'string' && typeof arg0.value !== 'string') {
+				throw illegalArgument('command');
+			}
+			this._command = arg0;
+			this._args = arg1 as (string | vscode.ShellQuotedString)[];
+			this._options = arg2;
+		} else {
+			if (typeof arg0 !== 'string') {
+				throw illegalArgument('commandLine');
+			}
+			this._commandLine = arg0;
+			this._options = arg1;
 		}
-		this._commandLine = commandLine;
-		this._options = options;
 	}
 
 	get commandLine(): string {
@@ -1230,6 +1473,25 @@ export class ShellExecution implements vscode.ShellExecution {
 		this._commandLine = value;
 	}
 
+	get command(): string | vscode.ShellQuotedString {
+		return this._command;
+	}
+
+	set command(value: string | vscode.ShellQuotedString) {
+		if (typeof value !== 'string' && typeof value.value !== 'string') {
+			throw illegalArgument('command');
+		}
+		this._command = value;
+	}
+
+	get args(): (string | vscode.ShellQuotedString)[] {
+		return this._args;
+	}
+
+	set args(value: (string | vscode.ShellQuotedString)[]) {
+		this._args = value || [];
+	}
+
 	get options(): vscode.ShellExecutionOptions {
 		return this._options;
 	}
@@ -1237,6 +1499,29 @@ export class ShellExecution implements vscode.ShellExecution {
 	set options(value: vscode.ShellExecutionOptions) {
 		this._options = value;
 	}
+
+	public computeId(): string {
+		const hash = crypto.createHash('md5');
+		hash.update('shell');
+		if (this._commandLine !== void 0) {
+			hash.update(this._commandLine);
+		}
+		if (this._command !== void 0) {
+			hash.update(typeof this._command === 'string' ? this._command : this._command.value);
+		}
+		if (this._args && this._args.length > 0) {
+			for (let arg of this._args) {
+				hash.update(typeof arg === 'string' ? arg : arg.value);
+			}
+		}
+		return hash.digest('hex');
+	}
+}
+
+export enum ShellQuoting {
+	Escape = 1,
+	Strong = 2,
+	Weak = 3
 }
 
 export enum TaskScope {
@@ -1246,8 +1531,9 @@ export enum TaskScope {
 
 export class Task implements vscode.Task {
 
+	private __id: string;
+
 	private _definition: vscode.TaskDefinition;
-	private _definitionKey: string;
 	private _scope: vscode.TaskScope.Global | vscode.TaskScope.Workspace | vscode.WorkspaceFolder;
 	private _name: string;
 	private _execution: ProcessExecution | ShellExecution;
@@ -1294,6 +1580,34 @@ export class Task implements vscode.Task {
 		this._isBackground = false;
 	}
 
+	get _id(): string {
+		return this.__id;
+	}
+
+	set _id(value: string) {
+		this.__id = value;
+	}
+
+	private clear(): void {
+		if (this.__id === void 0) {
+			return;
+		}
+		this.__id = undefined;
+		this._scope = undefined;
+		this._definition = undefined;
+		if (this._execution instanceof ProcessExecution) {
+			this._definition = {
+				type: 'process',
+				id: this._execution.computeId()
+			};
+		} else if (this._execution instanceof ShellExecution) {
+			this._definition = {
+				type: 'shell',
+				id: this._execution.computeId()
+			};
+		}
+	}
+
 	get definition(): vscode.TaskDefinition {
 		return this._definition;
 	}
@@ -1302,17 +1616,8 @@ export class Task implements vscode.Task {
 		if (value === void 0 || value === null) {
 			throw illegalArgument('Kind can\'t be undefined or null');
 		}
-		this._definitionKey = undefined;
+		this.clear();
 		this._definition = value;
-	}
-
-	get definitionKey(): string {
-		if (!this._definitionKey) {
-			const hash = crypto.createHash('md5');
-			hash.update(JSON.stringify(this._definition));
-			this._definitionKey = hash.digest('hex');
-		}
-		return this._definitionKey;
 	}
 
 	get scope(): vscode.TaskScope.Global | vscode.TaskScope.Workspace | vscode.WorkspaceFolder {
@@ -1320,6 +1625,7 @@ export class Task implements vscode.Task {
 	}
 
 	set target(value: vscode.TaskScope.Global | vscode.TaskScope.Workspace | vscode.WorkspaceFolder) {
+		this.clear();
 		this._scope = value;
 	}
 
@@ -1331,6 +1637,7 @@ export class Task implements vscode.Task {
 		if (typeof value !== 'string') {
 			throw illegalArgument('name');
 		}
+		this.clear();
 		this._name = value;
 	}
 
@@ -1342,6 +1649,7 @@ export class Task implements vscode.Task {
 		if (value === null) {
 			value = undefined;
 		}
+		this.clear();
 		this._execution = value;
 	}
 
@@ -1355,6 +1663,7 @@ export class Task implements vscode.Task {
 			this._hasDefinedMatchers = false;
 			return;
 		}
+		this.clear();
 		this._problemMatchers = value;
 		this._hasDefinedMatchers = true;
 	}
@@ -1371,6 +1680,7 @@ export class Task implements vscode.Task {
 		if (value !== true && value !== false) {
 			value = false;
 		}
+		this.clear();
 		this._isBackground = value;
 	}
 
@@ -1382,6 +1692,7 @@ export class Task implements vscode.Task {
 		if (typeof value !== 'string' || value.length === 0) {
 			throw illegalArgument('source must be a string of length > 0');
 		}
+		this.clear();
 		this._source = value;
 	}
 
@@ -1394,6 +1705,7 @@ export class Task implements vscode.Task {
 			this._group = undefined;
 			return;
 		}
+		this.clear();
 		this._group = value;
 	}
 
@@ -1405,6 +1717,7 @@ export class Task implements vscode.Task {
 		if (value === null) {
 			value = undefined;
 		}
+		this.clear();
 		this._presentationOptions = value;
 	}
 }
@@ -1413,15 +1726,26 @@ export class Task implements vscode.Task {
 export enum ProgressLocation {
 	SourceControl = 1,
 	Window = 10,
+	Notification = 15
 }
 
 export class TreeItem {
 
+	label?: string;
+	resourceUri?: URI;
 	iconPath?: string | URI | { light: string | URI; dark: string | URI };
 	command?: vscode.Command;
 	contextValue?: string;
+	tooltip?: string;
 
-	constructor(public label: string, public collapsibleState: vscode.TreeItemCollapsibleState = TreeItemCollapsibleState.None) {
+	constructor(label: string, collapsibleState?: vscode.TreeItemCollapsibleState)
+	constructor(resourceUri: URI, collapsibleState?: vscode.TreeItemCollapsibleState)
+	constructor(arg1: string | URI, public collapsibleState: vscode.TreeItemCollapsibleState = TreeItemCollapsibleState.None) {
+		if (arg1 instanceof URI) {
+			this.resourceUri = arg1;
+		} else {
+			this.label = arg1;
+		}
 	}
 
 }
@@ -1430,6 +1754,18 @@ export enum TreeItemCollapsibleState {
 	None = 0,
 	Collapsed = 1,
 	Expanded = 2
+}
+
+export class ThemeIcon {
+	static readonly File = new ThemeIcon('file');
+
+	static readonly Folder = new ThemeIcon('folder');
+
+	readonly id: string;
+
+	private constructor(id: string) {
+		this.id = id;
+	}
 }
 
 export class ThemeColor {
@@ -1465,4 +1801,158 @@ export class RelativePattern implements IRelativePattern {
 		this.base = typeof base === 'string' ? base : base.uri.fsPath;
 		this.pattern = pattern;
 	}
+
+	public pathToRelative(from: string, to: string): string {
+		return relative(from, to);
+	}
+}
+
+export class Breakpoint {
+
+	readonly enabled: boolean;
+	readonly condition?: string;
+	readonly hitCondition?: string;
+	readonly logMessage?: string;
+
+	protected constructor(enabled?: boolean, condition?: string, hitCondition?: string, logMessage?: string) {
+		this.enabled = typeof enabled === 'boolean' ? enabled : true;
+		if (typeof condition === 'string') {
+			this.condition = condition;
+		}
+		if (typeof hitCondition === 'string') {
+			this.hitCondition = hitCondition;
+		}
+		if (typeof logMessage === 'string') {
+			this.logMessage = logMessage;
+		}
+	}
+}
+
+export class SourceBreakpoint extends Breakpoint {
+	readonly location: Location;
+
+	constructor(location: Location, enabled?: boolean, condition?: string, hitCondition?: string, logMessage?: string) {
+		super(enabled, condition, hitCondition, logMessage);
+		if (location === null) {
+			throw illegalArgument('location');
+		}
+		this.location = location;
+	}
+}
+
+export class FunctionBreakpoint extends Breakpoint {
+	readonly functionName: string;
+
+	constructor(functionName: string, enabled?: boolean, condition?: string, hitCondition?: string, logMessage?: string) {
+		super(enabled, condition, hitCondition, logMessage);
+		if (!functionName) {
+			throw illegalArgument('functionName');
+		}
+		this.functionName = functionName;
+	}
+}
+
+export class DebugAdapterExecutable implements vscode.DebugAdapterExecutable {
+	readonly command: string;
+	readonly args: string[];
+
+	constructor(command: string, args?: string[]) {
+		this.command = command;
+		this.args = args;
+	}
+}
+
+export enum LogLevel {
+	Trace = 1,
+	Debug = 2,
+	Info = 3,
+	Warning = 4,
+	Error = 5,
+	Critical = 6,
+	Off = 7
+}
+
+//#region file api
+
+export enum FileChangeType {
+	Changed = 1,
+	Created = 2,
+	Deleted = 3,
+}
+
+export class FileSystemError extends Error {
+
+	static FileExists(messageOrUri?: string | URI): FileSystemError {
+		return new FileSystemError(messageOrUri, 'EntryExists', FileSystemError.FileExists);
+	}
+	static FileNotFound(messageOrUri?: string | URI): FileSystemError {
+		return new FileSystemError(messageOrUri, 'EntryNotFound', FileSystemError.FileNotFound);
+	}
+	static FileNotADirectory(messageOrUri?: string | URI): FileSystemError {
+		return new FileSystemError(messageOrUri, 'EntryNotADirectory', FileSystemError.FileNotADirectory);
+	}
+	static FileIsADirectory(messageOrUri?: string | URI): FileSystemError {
+		return new FileSystemError(messageOrUri, 'EntryIsADirectory', FileSystemError.FileIsADirectory);
+	}
+	static NoPermissions(messageOrUri?: string | URI): FileSystemError {
+		return new FileSystemError(messageOrUri, 'NoPermissions', FileSystemError.NoPermissions);
+	}
+	static Unavailable(messageOrUri?: string | URI): FileSystemError {
+		return new FileSystemError(messageOrUri, 'Unavailable', FileSystemError.Unavailable);
+	}
+
+	constructor(uriOrMessage?: string | URI, code?: string, terminator?: Function) {
+		super(URI.isUri(uriOrMessage) ? uriOrMessage.toString(true) : uriOrMessage);
+		this.name = code ? `${code} (FileSystemError)` : `FileSystemError`;
+
+		// workaround when extending builtin objects and when compiling to ES5, see:
+		// https://github.com/Microsoft/TypeScript-wiki/blob/master/Breaking-Changes.md#extending-built-ins-like-error-array-and-map-may-no-longer-work
+		if (typeof (<any>Object).setPrototypeOf === 'function') {
+			(<any>Object).setPrototypeOf(this, FileSystemError.prototype);
+		}
+
+		if (typeof Error.captureStackTrace === 'function' && typeof terminator === 'function') {
+			// nice stack traces
+			Error.captureStackTrace(this, terminator);
+		}
+	}
+}
+
+//#endregion
+
+//#region folding api
+
+export class FoldingRange {
+
+	start: number;
+
+	end: number;
+
+	kind?: FoldingRangeKind;
+
+	constructor(start: number, end: number, kind?: FoldingRangeKind) {
+		this.start = start;
+		this.end = end;
+		this.kind = kind;
+	}
+}
+
+export enum FoldingRangeKind {
+	Comment = 1,
+	Imports = 2,
+	Region = 3
+}
+
+//#endregion
+
+
+export enum CommentThreadCollapsibleState {
+	/**
+	 * Determines an item is collapsed
+	 */
+	Collapsed = 0,
+	/**
+	 * Determines an item is expanded
+	 */
+	Expanded = 1
 }

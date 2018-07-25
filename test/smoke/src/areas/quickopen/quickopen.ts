@@ -3,99 +3,117 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { SpectronApplication } from '../../spectron/application';
+import { Editors } from '../editor/editors';
+import { Code } from '../../vscode/code';
 
 export class QuickOpen {
 
-	static QUICK_OPEN_HIDDEN = 'div.quick-open-widget[aria-hidden="true"]';
-	static QUICK_OPEN = 'div.quick-open-widget[aria-hidden="false"]';
+	static QUICK_OPEN_HIDDEN = 'div.monaco-quick-open-widget[aria-hidden="true"]';
+	static QUICK_OPEN = 'div.monaco-quick-open-widget[aria-hidden="false"]';
 	static QUICK_OPEN_INPUT = `${QuickOpen.QUICK_OPEN} .quick-open-input input`;
 	static QUICK_OPEN_FOCUSED_ELEMENT = `${QuickOpen.QUICK_OPEN} .quick-open-tree .monaco-tree-row.focused .monaco-highlighted-label`;
 	static QUICK_OPEN_ENTRY_SELECTOR = 'div[aria-label="Quick Picker"] .monaco-tree-rows.show-twisties .monaco-tree-row .quick-open-entry';
+	static QUICK_OPEN_ENTRY_LABEL_SELECTOR = 'div[aria-label="Quick Picker"] .monaco-tree-rows.show-twisties .monaco-tree-row .quick-open-entry .label-name';
 
-	constructor(readonly spectron: SpectronApplication) {
-	}
+	constructor(private code: Code, private editors: Editors) { }
 
-	async openQuickOpen(): Promise<void> {
-		await this.spectron.command('workbench.action.quickOpen');
-		await this.waitForQuickOpenOpened();
-	}
+	async openQuickOpen(value: string): Promise<void> {
+		let retries = 0;
 
-	async openCommandPallette(): Promise<void> {
-		await this.spectron.command('workbench.action.showCommands');
-		await this.waitForQuickOpenOpened();
+		// other parts of code might steal focus away from quickopen :(
+		while (retries < 5) {
+			if (process.platform === 'darwin') {
+				await this.code.dispatchKeybinding('cmd+p');
+			} else {
+				await this.code.dispatchKeybinding('ctrl+p');
+			}
+
+			try {
+				await this.waitForQuickOpenOpened(10);
+				break;
+			} catch (err) {
+				if (++retries > 5) {
+					throw err;
+				}
+
+				await this.code.dispatchKeybinding('escape');
+			}
+		}
+
+		if (value) {
+			await this.code.waitForSetValue(QuickOpen.QUICK_OPEN_INPUT, value);
+		}
 	}
 
 	async closeQuickOpen(): Promise<void> {
-		await this.spectron.command('workbench.action.closeQuickOpen');
+		await this.code.dispatchKeybinding('escape');
 		await this.waitForQuickOpenClosed();
 	}
 
-	async type(text: string): Promise<void> {
-		await this.spectron.client.type(text);
-	}
-
 	async openFile(fileName: string): Promise<void> {
-		await this.openQuickOpen();
-		await this.type(fileName);
+		await this.openQuickOpen(fileName);
 
-		await this.waitForQuickOpenElements(names => names.some(n => n === fileName));
-		await this.spectron.client.keys(['Enter', 'NULL']);
-		await this.spectron.workbench.waitForActiveTab(fileName);
-		await this.spectron.workbench.waitForEditorFocus(fileName);
+		await this.waitForQuickOpenElements(names => names[0] === fileName);
+		await this.code.dispatchKeybinding('enter');
+		await this.editors.waitForActiveTab(fileName);
+		await this.editors.waitForEditorFocus(fileName);
 	}
 
-	async runCommand(commandText: string): Promise<void> {
-		await this.openCommandPallette();
-
-		// type the text
-		await this.type(commandText);
-
-		// wait for best choice to be focused
-		await this.spectron.client.waitForTextContent(QuickOpen.QUICK_OPEN_FOCUSED_ELEMENT, commandText);
-
-		// wait and click on best choice
-		await this.spectron.client.waitAndClick(QuickOpen.QUICK_OPEN_FOCUSED_ELEMENT);
-	}
-
-	async waitForQuickOpenOpened(): Promise<void> {
-		await this.spectron.client.waitForActiveElement(QuickOpen.QUICK_OPEN_INPUT);
-
-		// we gotta wait 50 milliseconds due to https://github.com/Microsoft/vscode/blob/master/src/vs/platform/list/browser/listService.ts#L59
-		await new Promise(c => setTimeout(c, 50));
+	async waitForQuickOpenOpened(retryCount?: number): Promise<void> {
+		await this.code.waitForActiveElement(QuickOpen.QUICK_OPEN_INPUT, retryCount);
 	}
 
 	private async waitForQuickOpenClosed(): Promise<void> {
-		await this.spectron.client.waitForElement(QuickOpen.QUICK_OPEN_HIDDEN);
+		await this.code.waitForElement(QuickOpen.QUICK_OPEN_HIDDEN);
 	}
 
 	async submit(text: string): Promise<void> {
-		await this.spectron.client.type(text);
-		await this.spectron.client.keys(['Enter', 'NULL']);
+		await this.code.waitForSetValue(QuickOpen.QUICK_OPEN_INPUT, text);
+		await this.code.dispatchKeybinding('enter');
 		await this.waitForQuickOpenClosed();
 	}
 
 	async selectQuickOpenElement(index: number): Promise<void> {
 		await this.waitForQuickOpenOpened();
 		for (let from = 0; from < index; from++) {
-			await this.spectron.client.keys(['ArrowDown', 'NULL']);
-			this.spectron.wait(3);
+			await this.code.dispatchKeybinding('down');
 		}
-		await this.spectron.client.keys(['Enter', 'NULL']);
+		await this.code.dispatchKeybinding('enter');
 		await this.waitForQuickOpenClosed();
 	}
 
 	async waitForQuickOpenElements(accept: (names: string[]) => boolean): Promise<void> {
-		await this.spectron.client.waitFor(() => this.getQuickOpenElements(), accept);
+		await this.code.waitForElements(QuickOpen.QUICK_OPEN_ENTRY_LABEL_SELECTOR, false, els => accept(els.map(e => e.textContent)));
 	}
 
-	private async getQuickOpenElements(): Promise<string[]> {
-		return await this.spectron.webclient.selectorExecute(QuickOpen.QUICK_OPEN_ENTRY_SELECTOR,
-			div => (Array.isArray(div) ? div : [div]).map(element => {
-				const name = element.querySelector('.label-name') as HTMLElement;
+	async runCommand(command: string): Promise<void> {
+		await this.openQuickOpen(`> ${command}`);
 
-				return name.textContent;
-			})
-		);
+		// wait for best choice to be focused
+		await this.code.waitForTextContent(QuickOpen.QUICK_OPEN_FOCUSED_ELEMENT, command);
+
+		// wait and click on best choice
+		await this.code.waitAndClick(QuickOpen.QUICK_OPEN_FOCUSED_ELEMENT);
+	}
+
+	async openQuickOutline(): Promise<void> {
+		let retries = 0;
+
+		while (++retries < 10) {
+			if (process.platform === 'darwin') {
+				await this.code.dispatchKeybinding('cmd+shift+o');
+			} else {
+				await this.code.dispatchKeybinding('ctrl+shift+o');
+			}
+
+			const text = await this.code.waitForTextContent('div[aria-label="Quick Picker"] .monaco-tree-rows.show-twisties div.monaco-tree-row .quick-open-entry .monaco-icon-label .label-name .monaco-highlighted-label span');
+
+			if (text !== 'No symbol information for the file') {
+				return;
+			}
+
+			await this.closeQuickOpen();
+			await new Promise(c => setTimeout(c, 250));
+		}
 	}
 }

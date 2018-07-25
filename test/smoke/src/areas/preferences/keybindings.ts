@@ -3,38 +3,32 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { SpectronApplication } from '../../spectron/application';
+import { Code } from '../../vscode/code';
+
+const SEARCH_INPUT = '.settings-search-input input';
 
 export class KeybindingsEditor {
 
-	constructor(private spectron: SpectronApplication) {
-		// noop
-	}
+	constructor(private code: Code) { }
 
-	public async openKeybindings(): Promise<void> {
-		await this.spectron.command('workbench.action.openGlobalKeybindings');
-		await this.spectron.client.waitForElement('.settings-search-input .synthetic-focus');
-	}
-
-	public async search(text: string, select: boolean = false): Promise<void> {
-		await this.spectron.client.type(text);
-		if (select) {
-			await this.spectron.client.waitAndClick('div[aria-label="Keybindings"] .monaco-list-row.keybinding-item');
-			await this.spectron.client.waitForElement('div[aria-label="Keybindings"] .monaco-list-row.keybinding-item.focused.selected');
+	async updateKeybinding(command: string, keybinding: string, ariaLabel: string): Promise<any> {
+		if (process.platform === 'darwin') {
+			await this.code.dispatchKeybinding('cmd+k cmd+s');
+		} else {
+			await this.code.dispatchKeybinding('ctrl+k ctrl+s');
 		}
-	}
 
-	public async openDefineKeybindingDialog(): Promise<any> {
-		await this.spectron.client.waitAndClick('div[aria-label="Keybindings"] .monaco-list-row.keybinding-item .action-item .icon.add');
-		return this.spectron.client.waitForElement('.defineKeybindingWidget .monaco-inputbox.synthetic-focus');
-	}
+		await this.code.waitForActiveElement(SEARCH_INPUT);
+		await this.code.waitForSetValue(SEARCH_INPUT, command);
 
-	public async updateKeybinding(command: string, keys: string[], ariaLabel: string): Promise<any> {
-		await this.search(command, true);
-		await this.openDefineKeybindingDialog();
-		await this.spectron.client.keys(keys);
-		await this.spectron.client.keys(['Enter', 'NULL']);
-		await this.spectron.client.waitForElement(`div[aria-label="Keybindings"] div[aria-label="Keybinding is ${ariaLabel}."]`);
-	}
+		await this.code.waitAndClick('.keybindings-list-container .monaco-list-row.keybinding-item');
+		await this.code.waitForElement('.keybindings-list-container .monaco-list-row.keybinding-item.focused.selected');
 
+		await this.code.waitAndClick('.keybindings-list-container .monaco-list-row.keybinding-item .action-item .icon.add');
+		await this.code.waitForActiveElement('.defineKeybindingWidget .monaco-inputbox input');
+
+		await this.code.dispatchKeybinding(keybinding);
+		await this.code.dispatchKeybinding('enter');
+		await this.code.waitForElement(`.keybindings-list-container div[aria-label="Keybinding is ${ariaLabel}."]`);
+	}
 }

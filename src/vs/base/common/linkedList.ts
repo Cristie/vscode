@@ -5,6 +5,8 @@
 
 'use strict';
 
+import { Iterator } from 'vs/base/common/iterator';
+
 class Node<E> {
 	element: E;
 	next: Node<E>;
@@ -24,16 +26,38 @@ export class LinkedList<E> {
 		return !this._first;
 	}
 
-	insert(element: E) {
+	clear(): void {
+		this._first = undefined;
+		this._last = undefined;
+	}
+
+	unshift(element: E) {
+		return this.insert(element, false);
+	}
+
+	push(element: E) {
+		return this.insert(element, true);
+	}
+
+	private insert(element: E, atTheEnd: boolean) {
 		const newNode = new Node(element);
 		if (!this._first) {
 			this._first = newNode;
 			this._last = newNode;
-		} else {
+
+		} else if (atTheEnd) {
+			// push
 			const oldLast = this._last;
 			this._last = newNode;
 			newNode.prev = oldLast;
 			oldLast.next = newNode;
+
+		} else {
+			// unshift
+			const oldFirst = this._first;
+			this._first = newNode;
+			newNode.next = oldFirst;
+			oldFirst.prev = newNode;
 		}
 
 		return () => {
@@ -70,22 +94,20 @@ export class LinkedList<E> {
 		};
 	}
 
-	iterator() {
-		let _done: boolean;
-		let _value: E;
+	iterator(): Iterator<E> {
 		let element = {
-			get done() { return _done; },
-			get value() { return _value; }
+			done: undefined,
+			value: undefined,
 		};
 		let node = this._first;
 		return {
 			next(): { done: boolean; value: E } {
 				if (!node) {
-					_done = true;
-					_value = undefined;
+					element.done = true;
+					element.value = undefined;
 				} else {
-					_done = false;
-					_value = node.element;
+					element.done = false;
+					element.value = node.element;
 					node = node.next;
 				}
 				return element;

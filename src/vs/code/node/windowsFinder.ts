@@ -5,17 +5,17 @@
 
 'use strict';
 
-import * as path from 'path';
-import * as fs from 'fs';
 import * as platform from 'vs/base/common/platform';
 import * as paths from 'vs/base/common/paths';
 import { OpenContext } from 'vs/platform/windows/common/windows';
-import { IWorkspaceIdentifier, ISingleFolderWorkspaceIdentifier, isSingleFolderWorkspaceIdentifier, IResolvedWorkspace } from 'vs/platform/workspaces/common/workspaces';
+import { IWorkspaceIdentifier, IResolvedWorkspace, ISingleFolderWorkspaceIdentifier, isSingleFolderWorkspaceIdentifier } from 'vs/platform/workspaces/common/workspaces';
 import { Schemas } from 'vs/base/common/network';
+import URI from 'vs/base/common/uri';
+import { hasToIgnoreCase, isEqual } from 'vs/base/common/resources';
 
 export interface ISimpleWindow {
 	openedWorkspace?: IWorkspaceIdentifier;
-	openedFolderPath?: string;
+	openedFolderUri?: URI;
 	openedFilePath?: string;
 	extensionDevelopmentPath?: string;
 	lastFocusTime: number;
@@ -32,24 +32,11 @@ export interface IBestWindowOrFolderOptions<W extends ISimpleWindow> {
 	workspaceResolver: (workspace: IWorkspaceIdentifier) => IResolvedWorkspace;
 }
 
-export function findBestWindowOrFolderForFile<W extends ISimpleWindow>({ windows, newWindow, reuseWindow, context, filePath, userHome, codeSettingsFolder, workspaceResolver }: IBestWindowOrFolderOptions<W>): W | string {
+export function findBestWindowOrFolderForFile<W extends ISimpleWindow>({ windows, newWindow, reuseWindow, context, filePath, workspaceResolver }: IBestWindowOrFolderOptions<W>): W {
 	if (!newWindow && filePath && (context === OpenContext.DESKTOP || context === OpenContext.CLI || context === OpenContext.DOCK)) {
 		const windowOnFilePath = findWindowOnFilePath(windows, filePath, workspaceResolver);
-
-		// 1) window wins if it has a workspace opened
-		if (windowOnFilePath && !!windowOnFilePath.openedWorkspace) {
+		if (windowOnFilePath) {
 			return windowOnFilePath;
-		}
-
-		// 2) window wins if it has a folder opened that is more specific than settings folder
-		const folderWithCodeSettings = !reuseWindow && findFolderWithCodeSettings(filePath, userHome, codeSettingsFolder);
-		if (windowOnFilePath && !(folderWithCodeSettings && folderWithCodeSettings.length > windowOnFilePath.openedFolderPath.length)) {
-			return windowOnFilePath;
-		}
-
-		// 3) finally return path to folder with settings
-		if (folderWithCodeSettings) {
-			return folderWithCodeSettings;
 		}
 	}
 
@@ -69,46 +56,12 @@ function findWindowOnFilePath<W extends ISimpleWindow>(windows: W[], filePath: s
 	}
 
 	// Then go with single folder windows that are parent of the provided file path
-	const singleFolderWindowsOnFilePath = windows.filter(window => typeof window.openedFolderPath === 'string' && paths.isEqualOrParent(filePath, window.openedFolderPath, !platform.isLinux /* ignorecase */));
+	const singleFolderWindowsOnFilePath = windows.filter(window => window.openedFolderUri && window.openedFolderUri.scheme === Schemas.file && paths.isEqualOrParent(filePath, window.openedFolderUri.fsPath, !platform.isLinux /* ignorecase */));
 	if (singleFolderWindowsOnFilePath.length) {
-		return singleFolderWindowsOnFilePath.sort((a, b) => -(a.openedFolderPath.length - b.openedFolderPath.length))[0];
+		return singleFolderWindowsOnFilePath.sort((a, b) => -(a.openedFolderUri.path.length - b.openedFolderUri.path.length))[0];
 	}
 
 	return null;
-}
-
-function findFolderWithCodeSettings(filePath: string, userHome?: string, codeSettingsFolder?: string): string {
-	let folder = path.dirname(paths.normalize(filePath, true));
-	let homeFolder = userHome && paths.normalize(userHome, true);
-	if (!platform.isLinux) {
-		homeFolder = homeFolder && homeFolder.toLowerCase();
-	}
-
-	let previous = null;
-	while (folder !== previous) {
-		if (hasCodeSettings(folder, homeFolder, codeSettingsFolder)) {
-			return folder;
-		}
-
-		previous = folder;
-		folder = path.dirname(folder);
-	}
-
-	return null;
-}
-
-function hasCodeSettings(folder: string, normalizedUserHome?: string, codeSettingsFolder = '.vscode') {
-	try {
-		if ((platform.isLinux ? folder : folder.toLowerCase()) === normalizedUserHome) {
-			return fs.statSync(path.join(folder, codeSettingsFolder, 'settings.json')).isFile(); // ~/.vscode/extensions is used for extensions
-		}
-
-		return fs.statSync(path.join(folder, codeSettingsFolder)).isDirectory();
-	} catch (err) {
-		// assume impossible to access
-	}
-
-	return false;
 }
 
 export function getLastActiveWindow<W extends ISimpleWindow>(windows: W[]): W {
@@ -122,7 +75,7 @@ export function findWindowOnWorkspace<W extends ISimpleWindow>(windows: W[], wor
 
 		// match on folder
 		if (isSingleFolderWorkspaceIdentifier(workspace)) {
-			if (typeof window.openedFolderPath === 'string' && (paths.isEqual(window.openedFolderPath, workspace, !platform.isLinux /* ignorecase */))) {
+			if (window.openedFolderUri && isEqual(window.openedFolderUri, workspace, hasToIgnoreCase(window.openedFolderUri))) {
 				return true;
 			}
 		}
@@ -150,16 +103,16 @@ export function findWindowOnExtensionDevelopmentPath<W extends ISimpleWindow>(wi
 	})[0];
 }
 
-export function findWindowOnWorkspaceOrFolderPath<W extends ISimpleWindow>(windows: W[], path: string): W {
+export function findWindowOnWorkspaceOrFolderUri<W extends ISimpleWindow>(windows: W[], uri: URI): W {
 	return windows.filter(window => {
 
 		// check for workspace config path
-		if (window.openedWorkspace && paths.isEqual(window.openedWorkspace.configPath, path, !platform.isLinux /* ignorecase */)) {
+		if (window.openedWorkspace && isEqual(URI.file(window.openedWorkspace.configPath), uri, !platform.isLinux /* ignorecase */)) {
 			return true;
 		}
 
 		// check for folder path
-		if (window.openedFolderPath && paths.isEqual(window.openedFolderPath, path, !platform.isLinux /* ignorecase */)) {
+		if (window.openedFolderUri && isEqual(window.openedFolderUri, uri, hasToIgnoreCase(uri))) {
 			return true;
 		}
 

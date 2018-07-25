@@ -5,24 +5,25 @@
 
 'use strict';
 
-import nls = require('vs/nls');
+import * as nls from 'vs/nls';
+import * as perf from 'vs/base/common/performance';
 import { TPromise } from 'vs/base/common/winjs.base';
 import { WorkbenchShell } from 'vs/workbench/electron-browser/shell';
 import * as browser from 'vs/base/browser/browser';
 import { domContentLoaded } from 'vs/base/browser/dom';
-import errors = require('vs/base/common/errors');
-import comparer = require('vs/base/common/comparers');
-import platform = require('vs/base/common/platform');
-import paths = require('vs/base/common/paths');
+import * as errors from 'vs/base/common/errors';
+import * as comparer from 'vs/base/common/comparers';
+import * as platform from 'vs/base/common/platform';
+import * as paths from 'vs/base/common/paths';
 import uri from 'vs/base/common/uri';
-import strings = require('vs/base/common/strings');
+import * as strings from 'vs/base/common/strings';
 import { IWorkspaceContextService, Workspace, WorkbenchState } from 'vs/platform/workspace/common/workspace';
-import { WorkspaceService } from 'vs/workbench/services/configuration/node/configuration';
+import { WorkspaceService } from 'vs/workbench/services/configuration/node/configurationService';
 import { SyncDescriptor } from 'vs/platform/instantiation/common/descriptors';
 import { ServiceCollection } from 'vs/platform/instantiation/common/serviceCollection';
 import { realpath } from 'vs/base/node/pfs';
 import { EnvironmentService } from 'vs/platform/environment/node/environmentService';
-import gracefulFs = require('graceful-fs');
+import * as gracefulFs from 'graceful-fs';
 import { IInitData } from 'vs/workbench/services/timer/common/timerService';
 import { TimerService } from 'vs/workbench/services/timer/node/timerService';
 import { KeyboardMapperFactory } from 'vs/workbench/services/keybinding/electron-browser/keybindingService';
@@ -30,22 +31,27 @@ import { IWindowConfiguration, IWindowsService } from 'vs/platform/windows/commo
 import { WindowsChannelClient } from 'vs/platform/windows/common/windowsIpc';
 import { IStorageService } from 'vs/platform/storage/common/storage';
 import { IEnvironmentService } from 'vs/platform/environment/common/environment';
-import { StorageService, inMemoryLocalStorageInstance } from 'vs/platform/storage/common/storageService';
+import { StorageService, inMemoryLocalStorageInstance, IStorage } from 'vs/platform/storage/common/storageService';
 import { Client as ElectronIPCClient } from 'vs/base/parts/ipc/electron-browser/ipc.electron-browser';
-import { webFrame, remote } from 'electron';
+import { webFrame } from 'electron';
 import { UpdateChannelClient } from 'vs/platform/update/common/updateIpc';
 import { IUpdateService } from 'vs/platform/update/common/update';
-import { URLChannelClient } from 'vs/platform/url/common/urlIpc';
+import { URLHandlerChannel, URLServiceChannelClient } from 'vs/platform/url/common/urlIpc';
 import { IURLService } from 'vs/platform/url/common/url';
 import { WorkspacesChannelClient } from 'vs/platform/workspaces/common/workspacesIpc';
-import { IWorkspacesService } from 'vs/platform/workspaces/common/workspaces';
-import { ICredentialsService } from 'vs/platform/credentials/common/credentials';
-import { CredentialsChannelClient } from 'vs/platform/credentials/node/credentialsIpc';
+import { IWorkspacesService, ISingleFolderWorkspaceIdentifier } from 'vs/platform/workspaces/common/workspaces';
+import { createSpdLogService } from 'vs/platform/log/node/spdlogService';
+import * as fs from 'fs';
+import { ConsoleLogService, MultiplexLogService, ILogService } from 'vs/platform/log/common/log';
+import { IssueChannelClient } from 'vs/platform/issue/common/issueIpc';
+import { IIssueService } from 'vs/platform/issue/common/issue';
+import { LogLevelSetterChannelClient, FollowerLogService } from 'vs/platform/log/common/logIpc';
+import { RelayURLService } from 'vs/platform/url/common/urlService';
+import { MenubarChannelClient } from 'vs/platform/menubar/common/menubarIpc';
+import { IMenubarService } from 'vs/platform/menubar/common/menubar';
+import { Schemas } from 'vs/base/common/network';
 
-import fs = require('fs');
 gracefulFs.gracefulify(fs); // enable gracefulFs
-
-const currentWindowId = remote.getCurrentWindow().id;
 
 export function startup(configuration: IWindowConfiguration): TPromise<void> {
 
@@ -70,31 +76,31 @@ export function startup(configuration: IWindowConfiguration): TPromise<void> {
 }
 
 function openWorkbench(configuration: IWindowConfiguration): TPromise<void> {
-	const mainProcessClient = new ElectronIPCClient(String(`window${currentWindowId}`));
-	const mainServices = createMainProcessServices(mainProcessClient);
+	const mainProcessClient = new ElectronIPCClient(`window:${configuration.windowId}`);
+	const mainServices = createMainProcessServices(mainProcessClient, configuration);
 
 	const environmentService = new EnvironmentService(configuration, configuration.execPath);
+	const logService = createLogService(mainProcessClient, configuration, environmentService);
+	logService.trace('openWorkbench configuration', JSON.stringify(configuration));
 
 	// Since the configuration service is one of the core services that is used in so many places, we initialize it
 	// right before startup of the workbench shell to have its data ready for consumers
-	return createAndInitializeWorkspaceService(configuration, environmentService, <IWorkspacesService>mainServices.get(IWorkspacesService)).then(workspaceService => {
+	return createAndInitializeWorkspaceService(configuration, environmentService).then(workspaceService => {
 		const timerService = new TimerService((<any>window).MonacoEnvironment.timers as IInitData, workspaceService.getWorkbenchState() === WorkbenchState.EMPTY);
 		const storageService = createStorageService(workspaceService, environmentService);
 
-		timerService.beforeDOMContentLoaded = Date.now();
-
 		return domContentLoaded().then(() => {
-			timerService.afterDOMContentLoaded = Date.now();
 
 			// Open Shell
-			timerService.beforeWorkbenchOpen = Date.now();
+			perf.mark('willStartWorkbench');
 			const shell = new WorkbenchShell(document.body, {
 				contextService: workspaceService,
 				configurationService: workspaceService,
 				environmentService,
+				logService,
 				timerService,
 				storageService
-			}, mainServices, configuration);
+			}, mainServices, mainProcessClient, configuration);
 			shell.open();
 
 			// Inform user about loading issues from the loader
@@ -109,22 +115,27 @@ function openWorkbench(configuration: IWindowConfiguration): TPromise<void> {
 	});
 }
 
-function createAndInitializeWorkspaceService(configuration: IWindowConfiguration, environmentService: EnvironmentService, workspacesService: IWorkspacesService): TPromise<WorkspaceService> {
-	return validateWorkspacePath(configuration).then(() => {
-		const workspaceService = new WorkspaceService(environmentService, workspacesService);
+function createAndInitializeWorkspaceService(configuration: IWindowConfiguration, environmentService: EnvironmentService): TPromise<WorkspaceService> {
+	const folderUri = configuration.folderUri ? uri.revive(configuration.folderUri) : null;
+	return validateFolderUri(folderUri, configuration.verbose).then(validatedFolderUri => {
 
-		return workspaceService.initialize(configuration.workspace || configuration.folderPath || configuration).then(() => workspaceService, error => workspaceService);
+		const workspaceService = new WorkspaceService(environmentService);
+
+		return workspaceService.initialize(configuration.workspace || validatedFolderUri || configuration).then(() => workspaceService, error => workspaceService);
 	});
 }
 
-function validateWorkspacePath(configuration: IWindowConfiguration): TPromise<void> {
-	if (!configuration.folderPath) {
-		return TPromise.as(null);
+function validateFolderUri(folderUri: ISingleFolderWorkspaceIdentifier, verbose: boolean): TPromise<uri> {
+
+	// Return early if we do not have a single folder uri or if it is a non file uri
+	if (!folderUri || folderUri.scheme !== Schemas.file) {
+		return TPromise.as(folderUri);
 	}
 
-	return realpath(configuration.folderPath).then(realFolderPath => {
+	// Otherwise: use realpath to resolve symbolic links to the truth
+	return realpath(folderUri.fsPath).then(realFolderPath => {
 
-		// for some weird reason, node adds a trailing slash to UNC paths
+		// For some weird reason, node adds a trailing slash to UNC paths
 		// we never ever want trailing slashes as our workspace path unless
 		// someone opens root ("/").
 		// See also https://github.com/nodejs/io.js/issues/1765
@@ -132,12 +143,19 @@ function validateWorkspacePath(configuration: IWindowConfiguration): TPromise<vo
 			realFolderPath = strings.rtrim(realFolderPath, paths.nativeSep);
 		}
 
-		// update config
-		configuration.folderPath = realFolderPath;
+		return uri.file(realFolderPath);
 	}, error => {
-		errors.onUnexpectedError(error);
+		if (verbose) {
+			errors.onUnexpectedError(error);
+		}
 
-		return null; // treat invalid paths as empty workspace
+		// Treat any error case as empty workbench case (no folder path)
+		return null;
+
+	}).then(realFolderUriOrNull => {
+
+		// Update config with real path if we have one
+		return realFolderUriOrNull;
 	});
 }
 
@@ -172,12 +190,26 @@ function createStorageService(workspaceService: IWorkspaceContextService, enviro
 	}
 
 	const disableStorage = !!environmentService.extensionTestsPath; // never keep any state when running extension tests!
-	const storage = disableStorage ? inMemoryLocalStorageInstance : window.localStorage;
+
+	let storage: IStorage;
+	if (disableStorage) {
+		storage = inMemoryLocalStorageInstance;
+	} else {
+		storage = window.localStorage;
+	}
 
 	return new StorageService(storage, storage, workspaceId, secondaryWorkspaceId);
 }
 
-function createMainProcessServices(mainProcessClient: ElectronIPCClient): ServiceCollection {
+function createLogService(mainProcessClient: ElectronIPCClient, configuration: IWindowConfiguration, environmentService: IEnvironmentService): ILogService {
+	const spdlogService = createSpdLogService(`renderer${configuration.windowId}`, configuration.logLevel, environmentService.logsPath);
+	const consoleLogService = new ConsoleLogService(configuration.logLevel);
+	const logService = new MultiplexLogService([consoleLogService, spdlogService]);
+	const logLevelClient = new LogLevelSetterChannelClient(mainProcessClient.getChannel('loglevel'));
+	return new FollowerLogService(logLevelClient, logService);
+}
+
+function createMainProcessServices(mainProcessClient: ElectronIPCClient, configuration: IWindowConfiguration): ServiceCollection {
 	const serviceCollection = new ServiceCollection();
 
 	const windowsChannel = mainProcessClient.getChannel('windows');
@@ -187,13 +219,21 @@ function createMainProcessServices(mainProcessClient: ElectronIPCClient): Servic
 	serviceCollection.set(IUpdateService, new SyncDescriptor(UpdateChannelClient, updateChannel));
 
 	const urlChannel = mainProcessClient.getChannel('url');
-	serviceCollection.set(IURLService, new SyncDescriptor(URLChannelClient, urlChannel, currentWindowId));
+	const mainUrlService = new URLServiceChannelClient(urlChannel);
+	const urlService = new RelayURLService(mainUrlService);
+	serviceCollection.set(IURLService, urlService);
+
+	const urlHandlerChannel = new URLHandlerChannel(urlService);
+	mainProcessClient.registerChannel('urlHandler', urlHandlerChannel);
+
+	const issueChannel = mainProcessClient.getChannel('issue');
+	serviceCollection.set(IIssueService, new SyncDescriptor(IssueChannelClient, issueChannel));
+
+	const menubarChannel = mainProcessClient.getChannel('menubar');
+	serviceCollection.set(IMenubarService, new SyncDescriptor(MenubarChannelClient, menubarChannel));
 
 	const workspacesChannel = mainProcessClient.getChannel('workspaces');
 	serviceCollection.set(IWorkspacesService, new WorkspacesChannelClient(workspacesChannel));
-
-	const credentialsChannel = mainProcessClient.getChannel('credentials');
-	serviceCollection.set(ICredentialsService, new CredentialsChannelClient(credentialsChannel));
 
 	return serviceCollection;
 }

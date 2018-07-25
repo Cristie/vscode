@@ -10,6 +10,7 @@ import { denodeify } from './util';
 import * as path from 'path';
 import * as http from 'http';
 import * as os from 'os';
+import * as fs from 'fs';
 import * as crypto from 'crypto';
 
 const randomBytes = denodeify<Buffer>(crypto.randomBytes);
@@ -27,6 +28,10 @@ function getIPCHandlePath(nonce: string): string {
 		return `\\\\.\\pipe\\vscode-git-askpass-${nonce}-sock`;
 	}
 
+	if (process.env['XDG_RUNTIME_DIR']) {
+		return path.join(process.env['XDG_RUNTIME_DIR'] as string, `vscode-git-askpass-${nonce}.sock`);
+	}
+
 	return path.join(os.tmpdir(), `vscode-git-askpass-${nonce}.sock`);
 }
 
@@ -34,6 +39,7 @@ export class Askpass implements Disposable {
 
 	private server: http.Server;
 	private ipcHandlePathPromise: Promise<string>;
+	private ipcHandlePath: string | undefined;
 	private enabled = true;
 
 	constructor() {
@@ -48,6 +54,7 @@ export class Askpass implements Disposable {
 		const buffer = await randomBytes(20);
 		const nonce = buffer.toString('hex');
 		const ipcHandlePath = getIPCHandlePath(nonce);
+		this.ipcHandlePath = ipcHandlePath;
 
 		try {
 			this.server.listen(ipcHandlePath);
@@ -106,5 +113,9 @@ export class Askpass implements Disposable {
 
 	dispose(): void {
 		this.server.close();
+
+		if (this.ipcHandlePath && process.platform !== 'win32') {
+			fs.unlinkSync(this.ipcHandlePath);
+		}
 	}
 }

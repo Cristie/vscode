@@ -4,28 +4,33 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
-import { localize } from 'vs/nls';
-import { IModel } from 'vs/editor/common/editorCommon';
-import { ISuggestSupport, ISuggestResult, ISuggestion, LanguageId, SuggestionType, SnippetType } from 'vs/editor/common/modes';
-import { registerSingleton } from 'vs/platform/instantiation/common/extensions';
-import { setSnippetSuggestSupport } from 'vs/editor/contrib/suggest/browser/suggest';
-import { IModeService } from 'vs/editor/common/services/modeService';
-import { Position } from 'vs/editor/common/core/position';
-import { overlap, compare, startsWith } from 'vs/base/common/strings';
-import { SnippetParser } from 'vs/editor/contrib/snippet/browser/snippetParser';
-import { IEnvironmentService } from 'vs/platform/environment/common/environment';
-import { IExtensionService } from 'vs/platform/extensions/common/extensions';
-import { IDisposable, dispose } from 'vs/base/common/lifecycle';
-import { join } from 'path';
-import { mkdirp } from 'vs/base/node/pfs';
-import { watch } from 'fs';
-import { SnippetFile } from 'vs/workbench/parts/snippets/electron-browser/snippetsFile';
-import { TPromise } from 'vs/base/common/winjs.base';
-import { Snippet, ISnippetsService } from 'vs/workbench/parts/snippets/electron-browser/snippets.contribution';
-import { IJSONSchema } from 'vs/base/common/jsonSchema';
-import { ExtensionsRegistry, IExtensionPointUser } from 'vs/platform/extensions/common/extensionsRegistry';
-import { languagesExtPoint } from 'vs/workbench/services/mode/common/workbenchModeService';
+import { basename, extname, join } from 'path';
 import { MarkdownString } from 'vs/base/common/htmlContent';
+import { IJSONSchema } from 'vs/base/common/jsonSchema';
+import { dispose, IDisposable, toDisposable } from 'vs/base/common/lifecycle';
+import { values } from 'vs/base/common/map';
+import * as resources from 'vs/base/common/resources';
+import { compare, endsWith, isFalsyOrWhitespace } from 'vs/base/common/strings';
+import URI from 'vs/base/common/uri';
+import { watch } from 'vs/base/node/extfs';
+import { exists, mkdirp, readdir } from 'vs/base/node/pfs';
+import { Position } from 'vs/editor/common/core/position';
+import { ITextModel } from 'vs/editor/common/model';
+import { ISuggestion, ISuggestResult, ISuggestSupport, LanguageId, SnippetType, SuggestContext, SuggestionType } from 'vs/editor/common/modes';
+import { IModeService } from 'vs/editor/common/services/modeService';
+import { SnippetParser } from 'vs/editor/contrib/snippet/snippetParser';
+import { setSnippetSuggestSupport } from 'vs/editor/contrib/suggest/suggest';
+import { localize } from 'vs/nls';
+import { IEnvironmentService } from 'vs/platform/environment/common/environment';
+import { IFileService } from 'vs/platform/files/common/files';
+import { registerSingleton } from 'vs/platform/instantiation/common/extensions';
+import { ILifecycleService, LifecyclePhase } from 'vs/platform/lifecycle/common/lifecycle';
+import { ILogService } from 'vs/platform/log/common/log';
+import { ISnippetsService } from 'vs/workbench/parts/snippets/electron-browser/snippets.contribution';
+import { Snippet, SnippetFile } from 'vs/workbench/parts/snippets/electron-browser/snippetsFile';
+import { IExtensionService } from 'vs/workbench/services/extensions/common/extensions';
+import { ExtensionsRegistry, IExtensionPointUser } from 'vs/workbench/services/extensions/common/extensionsRegistry';
+import { languagesExtPoint } from 'vs/workbench/services/mode/common/workbenchModeService';
 
 namespace schema {
 
@@ -34,37 +39,56 @@ namespace schema {
 		path: string;
 	}
 
-	export function isValidSnippet(extension: IExtensionPointUser<ISnippetsExtensionPoint[]>, snippet: ISnippetsExtensionPoint, modeService: IModeService): boolean {
-		if (!snippet.language || (typeof snippet.language !== 'string') || !modeService.isRegisteredMode(snippet.language)) {
-			extension.collector.error(localize(
-				'invalid.language',
-				"Unknown language in `contributes.{0}.language`. Provided value: {1}",
-				extension.description.name, String(snippet.language)
-			));
-			return false;
+	export interface IValidSnippetsExtensionPoint {
+		language: string;
+		location: URI;
+	}
 
-		} else if (!snippet.path || (typeof snippet.path !== 'string')) {
+	export function toValidSnippet(extension: IExtensionPointUser<ISnippetsExtensionPoint[]>, snippet: ISnippetsExtensionPoint, modeService: IModeService): IValidSnippetsExtensionPoint {
+
+		if (isFalsyOrWhitespace(snippet.path)) {
 			extension.collector.error(localize(
 				'invalid.path.0',
 				"Expected string in `contributes.{0}.path`. Provided value: {1}",
 				extension.description.name, String(snippet.path)
 			));
-			return false;
-
-		} else {
-			const normalizedAbsolutePath = join(extension.description.extensionFolderPath, snippet.path);
-			if (normalizedAbsolutePath.indexOf(extension.description.extensionFolderPath) !== 0) {
-				extension.collector.error(localize(
-					'invalid.path.1',
-					"Expected `contributes.{0}.path` ({1}) to be included inside extension's folder ({2}). This might make the extension non-portable.",
-					extension.description.name, normalizedAbsolutePath, extension.description.extensionFolderPath
-				));
-				return false;
-			}
-
-			snippet.path = normalizedAbsolutePath;
-			return true;
+			return null;
 		}
+
+		if (isFalsyOrWhitespace(snippet.language) && !endsWith(snippet.path, '.code-snippets')) {
+			extension.collector.error(localize(
+				'invalid.language.0',
+				"When omitting the language, the value of `contributes.{0}.path` must be a `.code-snippets`-file. Provided value: {1}",
+				extension.description.name, String(snippet.path)
+			));
+			return null;
+		}
+
+		if (!isFalsyOrWhitespace(snippet.language) && !modeService.isRegisteredMode(snippet.language)) {
+			extension.collector.error(localize(
+				'invalid.language',
+				"Unknown language in `contributes.{0}.language`. Provided value: {1}",
+				extension.description.name, String(snippet.language)
+			));
+			return null;
+
+		}
+
+		const extensionLocation = extension.description.extensionLocation;
+		const snippetLocation = resources.joinPath(extensionLocation, snippet.path);
+		if (snippetLocation.path.indexOf(extensionLocation.path) !== 0) {
+			extension.collector.error(localize(
+				'invalid.path.1',
+				"Expected `contributes.{0}.path` ({1}) to be included inside extension's folder ({2}). This might make the extension non-portable.",
+				extension.description.name, snippetLocation.path, extensionLocation.path
+			));
+			return null;
+		}
+
+		return {
+			language: snippet.language,
+			location: snippetLocation
+		};
 	}
 
 	export const snippetsContribution: IJSONSchema = {
@@ -92,20 +116,20 @@ class SnippetsService implements ISnippetsService {
 
 	readonly _serviceBrand: any;
 
-	private readonly _pendingExtensionSnippets = new Map<LanguageId, [IExtensionPointUser<any>, string][]>();
-	private readonly _extensionSnippets = new Map<LanguageId, Snippet[]>();
-	private readonly _userSnippets = new Map<LanguageId, Snippet[]>();
-	private readonly _userSnippetsFolder: string;
 	private readonly _disposables: IDisposable[] = [];
+	private readonly _initPromise: Promise<any>;
+	private readonly _files = new Map<string, SnippetFile>();
 
 	constructor(
-		@IModeService readonly _modeService: IModeService,
-		@IExtensionService readonly _extensionService: IExtensionService,
-		@IEnvironmentService environmentService: IEnvironmentService,
+		@IEnvironmentService private readonly _environmentService: IEnvironmentService,
+		@IModeService private readonly _modeService: IModeService,
+		@ILogService private readonly _logService: ILogService,
+		@IExtensionService extensionService: IExtensionService,
+		@ILifecycleService lifecycleService: ILifecycleService,
+		@IFileService private readonly _fileService: IFileService,
 	) {
-		this._userSnippetsFolder = join(environmentService.appSettingsHome, 'snippets');
-		this._prepUserSnippetsWatching();
-		this._prepExtensionSnippets();
+		this._initExtensionSnippets();
+		this._initPromise = Promise.resolve(lifecycleService.when(LifecyclePhase.Running).then(() => this._initUserSnippets()));
 
 		setSnippetSuggestSupport(new SnippetSuggestProvider(this._modeService, this));
 	}
@@ -114,127 +138,130 @@ class SnippetsService implements ISnippetsService {
 		dispose(this._disposables);
 	}
 
-	async getSnippets(languageId: LanguageId): TPromise<Snippet[]> {
-		let result: Snippet[] = [];
-		await TPromise.join([
-			this._extensionService.onReady(),
-			this._getOrLoadUserSnippets(languageId, result),
-			this._getOrLoadExtensionSnippets(languageId, result)
-		]);
-		return result;
+	getSnippetFiles(): Promise<SnippetFile[]> {
+		return this._initPromise.then(() => values(this._files));
+	}
+
+	getSnippets(languageId: LanguageId): Promise<Snippet[]> {
+		return this._initPromise.then(() => {
+			const langName = this._modeService.getLanguageIdentifier(languageId).language;
+			const result: Snippet[] = [];
+			const promises: Promise<any>[] = [];
+			this._files.forEach(file => {
+				promises.push(file.load()
+					.then(file => file.select(langName, result))
+					.catch(err => this._logService.error(err, file.location.toString()))
+				);
+			});
+			return Promise.all(promises).then(() => result);
+		});
 	}
 
 	getSnippetsSync(languageId: LanguageId): Snippet[] {
-		// just kick off snippet loading for this language such
-		// that subseqent calls to this method return more
-		// correct results
-		this.getSnippets(languageId).done(undefined, undefined);
-
-		// collect and return what we already have
-		let userSnippets = this._userSnippets.get(languageId);
-		let extensionSnippets = this._extensionSnippets.get(languageId);
-		return (userSnippets || []).concat(extensionSnippets || []);
+		const langName = this._modeService.getLanguageIdentifier(languageId).language;
+		const result: Snippet[] = [];
+		this._files.forEach(file => {
+			// kick off loading (which is a noop in case it's already loaded)
+			// and optimistically collect snippets
+			file.load().catch(err => { /*ignore*/ });
+			file.select(langName, result);
+		});
+		return result;
 	}
 
-	// --- extension snippet logic ---
+	// --- loading, watching
 
-	private async _prepExtensionSnippets(): TPromise<void> {
-		ExtensionsRegistry.registerExtensionPoint<schema.ISnippetsExtensionPoint[]>('snippets', [languagesExtPoint], schema.snippetsContribution).setHandler(async extensions => {
+	private _initExtensionSnippets(): void {
+		ExtensionsRegistry.registerExtensionPoint<schema.ISnippetsExtensionPoint[]>('snippets', [languagesExtPoint], schema.snippetsContribution).setHandler(extensions => {
 			for (const extension of extensions) {
 				for (const contribution of extension.value) {
-					if (schema.isValidSnippet(extension, contribution, this._modeService)) {
-						const { id } = this._modeService.getLanguageIdentifier(contribution.language);
-						const array = this._pendingExtensionSnippets.get(id);
-						if (!array) {
-							this._pendingExtensionSnippets.set(id, [[extension, contribution.path]]);
-						} else {
-							array.push([extension, contribution.path]);
+					const validContribution = schema.toValidSnippet(extension, contribution, this._modeService);
+					if (!validContribution) {
+						continue;
+					}
+
+					if (this._files.has(validContribution.location.toString())) {
+						this._files.get(validContribution.location.toString()).defaultScopes.push(validContribution.language);
+
+					} else {
+						const file = new SnippetFile(validContribution.location, validContribution.language ? [validContribution.language] : undefined, extension.description, this._fileService);
+						this._files.set(file.location.toString(), file);
+
+						if (this._environmentService.isExtensionDevelopment) {
+							file.load().then(file => {
+								// warn about bad tabstop/variable usage
+								if (file.data.some(snippet => snippet.isBogous)) {
+									extension.collector.warn(localize(
+										'badVariableUse',
+										"One or more snippets from the extension '{0}' very likely confuse snippet-variables and snippet-placeholders (see https://code.visualstudio.com/docs/editor/userdefinedsnippets#_snippet-syntax for more details)",
+										extension.description.name
+									));
+								}
+							}, err => {
+								// generic error
+								extension.collector.warn(localize(
+									'badFile',
+									"The snippet file \"{0}\" could not be read.",
+									file.location
+								));
+							});
 						}
+
 					}
 				}
 			}
 		});
 	}
 
-	private async _getOrLoadExtensionSnippets(languageId: LanguageId, bucket: Snippet[]): TPromise<void> {
+	private _initUserSnippets(): Thenable<any> {
+		const addUserSnippet = (filepath: string) => {
+			const ext = extname(filepath);
+			if (ext === '.json') {
+				const langName = basename(filepath, '.json');
+				this._files.set(filepath, new SnippetFile(URI.file(filepath), [langName], undefined, this._fileService));
 
-		if (this._extensionSnippets.has(languageId)) {
-			bucket.push(...this._extensionSnippets.get(languageId));
+			} else if (ext === '.code-snippets') {
+				this._files.set(filepath, new SnippetFile(URI.file(filepath), undefined, undefined, this._fileService));
+			}
+		};
 
-		} else if (this._pendingExtensionSnippets.has(languageId)) {
-			const pending = this._pendingExtensionSnippets.get(languageId);
-			this._pendingExtensionSnippets.delete(languageId);
-
-			const snippets = [];
-			this._extensionSnippets.set(languageId, snippets);
-
-			for (const [extension, filepath] of pending) {
-				let file: SnippetFile;
-				try {
-					file = await SnippetFile.fromFile(filepath, extension.description.displayName || extension.description.name, true);
-				} catch (e) {
-					extension.collector.warn(localize(
-						'badFile',
-						"The snippet file \"{0}\" could not be read.",
-						filepath
-					));
+		const userSnippetsFolder = join(this._environmentService.appSettingsHome, 'snippets');
+		return mkdirp(userSnippetsFolder).then(() => {
+			return readdir(userSnippetsFolder);
+		}).then(entries => {
+			for (const entry of entries) {
+				addUserSnippet(join(userSnippetsFolder, entry));
+			}
+		}).then(() => {
+			// watch
+			const watcher = watch(userSnippetsFolder, (type, filename) => {
+				if (typeof filename !== 'string') {
+					return;
 				}
-				if (file) {
-					for (const snippet of file.data) {
-						snippets.push(snippet);
-						bucket.push(snippet);
-						if (snippet.isBogous) {
-							extension.collector.warn(localize(
-								'badVariableUse',
-								"The \"{0}\"-snippet very likely confuses snippet-variables and snippet-placeholders. See https://code.visualstudio.com/docs/editor/userdefinedsnippets#_snippet-syntax for more details.",
-								snippet.name
-							));
+				const filepath = join(userSnippetsFolder, filename);
+				exists(filepath).then(value => {
+					if (value) {
+						// file created or changed
+						if (this._files.has(filepath)) {
+							this._files.get(filepath).reset();
+						} else {
+							addUserSnippet(filepath);
 						}
+					} else {
+						// file not found
+						this._files.delete(filepath);
 					}
+				});
+			}, (error: string) => this._logService.error(error));
+			this._disposables.push(toDisposable(() => {
+				if (watcher) {
+					watcher.removeAllListeners();
+					watcher.close();
 				}
-			}
-		}
-	}
+			}));
 
-	// --- user snippet logic ---
-
-	private async _getOrLoadUserSnippets(languageId: LanguageId, bucket: Snippet[]): TPromise<void> {
-		let snippets = this._userSnippets.get(languageId);
-		if (snippets === undefined) {
-			try {
-				snippets = (await SnippetFile.fromFile(this._getUserSnippetFilepath(languageId), localize('source.snippet', "User Snippet"))).data;
-			} catch (e) {
-				snippets = null;
-			}
-			this._userSnippets.set(languageId, snippets);
-		}
-
-		if (snippets) {
-			bucket.push(...snippets);
-		}
-	}
-
-	private _getUserSnippetFilepath(languageId: LanguageId): string {
-		const { language } = this._modeService.getLanguageIdentifier(languageId);
-		const filepath = join(this._userSnippetsFolder, `${language}.json`);
-		return filepath;
-	}
-
-	private _prepUserSnippetsWatching(): void {
-		// Install a FS watcher on the snippet directory and when an
-		// event occurs delete any cached snippet information
-		mkdirp(this._userSnippetsFolder).then(() => {
-			const watcher = watch(this._userSnippetsFolder);
-			this._disposables.push({ dispose: () => watcher.close() });
-			watcher.on('change', (type, filename) => {
-				if (typeof filename === 'string') {
-					const language = filename.replace(/\.json$/, '').toLowerCase();
-					const languageId = this._modeService.getLanguageIdentifier(language);
-					if (languageId) {
-						this._userSnippets.delete(languageId.id);
-					}
-				}
-			});
+		}).then(undefined, err => {
+			this._logService.error('Failed to load user snippets', err);
 		});
 	}
 }
@@ -262,8 +289,8 @@ export class SnippetSuggestion implements ISuggestion {
 		overwriteBefore: number
 	) {
 		this.label = snippet.prefix;
-		this.detail = localize('detail.snippet', "{0} ({1})", snippet.description, snippet.source);
-		this.insertText = snippet.codeSnippet;
+		this.detail = localize('detail.snippet', "{0} ({1})", snippet.description || snippet.name, snippet.source);
+		this.insertText = snippet.body;
 		this.overwriteBefore = overwriteBefore;
 		this.sortText = `${snippet.isFromExtension ? 'z' : 'a'}-${snippet.prefix}`;
 		this.noAutoAccept = true;
@@ -273,6 +300,7 @@ export class SnippetSuggestion implements ISuggestion {
 
 	resolve(): this {
 		this.documentation = new MarkdownString().appendCodeblock('', new SnippetParser().text(this.snippet.codeSnippet));
+		this.insertText = this.snippet.codeSnippet;
 		return this;
 	}
 
@@ -285,62 +313,83 @@ export class SnippetSuggestion implements ISuggestion {
 export class SnippetSuggestProvider implements ISuggestSupport {
 
 	constructor(
-		@IModeService private _modeService: IModeService,
-		@ISnippetsService private _snippets: ISnippetsService
+		@IModeService private readonly _modeService: IModeService,
+		@ISnippetsService private readonly _snippets: ISnippetsService
 	) {
 		//
 	}
 
-	async provideCompletionItems(model: IModel, position: Position): TPromise<ISuggestResult> {
+	provideCompletionItems(model: ITextModel, position: Position, context: SuggestContext): Promise<ISuggestResult> {
 
 		const languageId = this._getLanguageIdAtPosition(model, position);
-		const snippets = await this._snippets.getSnippets(languageId);
-		const suggestions: SnippetSuggestion[] = [];
+		return this._snippets.getSnippets(languageId).then(snippets => {
 
-		const lowWordUntil = model.getWordUntilPosition(position).word.toLowerCase();
-		const lowLineUntil = model.getLineContent(position.lineNumber).substr(Math.max(0, position.column - 100), position.column - 1).toLowerCase();
+			let suggestions: SnippetSuggestion[];
+			let pos = { lineNumber: position.lineNumber, column: Math.max(1, position.column - 100) };
+			let lineOffsets: number[] = [];
+			let linePrefixLow = model.getLineContent(position.lineNumber).substr(Math.max(0, position.column - 100), position.column - 1).toLowerCase();
 
-		for (const snippet of snippets) {
+			while (pos.column < position.column) {
+				let word = model.getWordAtPosition(pos);
+				if (word) {
+					// at a word
+					lineOffsets.push(word.startColumn - 1);
+					pos.column = word.endColumn + 1;
 
-			const lowPrefix = snippet.prefix.toLowerCase();
-			let overwriteBefore = 0;
-			let accetSnippet = true;
+					if (word.endColumn - 1 < linePrefixLow.length && !/\s/.test(linePrefixLow[word.endColumn - 1])) {
+						lineOffsets.push(word.endColumn - 1);
+					}
 
-			if (lowWordUntil.length > 0 && startsWith(lowPrefix, lowWordUntil)) {
-				// cheap match on the (none-empty) current word
-				overwriteBefore = lowWordUntil.length;
-				accetSnippet = true;
-
-			} else if (lowLineUntil.length > 0 && lowLineUntil.match(/[^\s]$/)) {
-				// compute overlap between snippet and (none-empty) line on text
-				overwriteBefore = overlap(lowLineUntil, snippet.prefix.toLowerCase());
-				accetSnippet = overwriteBefore > 0 && !model.getWordAtPosition(new Position(position.lineNumber, position.column - overwriteBefore));
+				} else if (!/\s/.test(linePrefixLow[pos.column - 1])) {
+					// at a none-whitespace character
+					lineOffsets.push(pos.column - 1);
+					pos.column += 1;
+				} else {
+					// always advance!
+					pos.column += 1;
+				}
 			}
 
-			if (accetSnippet) {
-				suggestions.push(new SnippetSuggestion(snippet, overwriteBefore));
-			}
-		}
+			if (lineOffsets.length === 0) {
+				// no interesting spans found -> pick all snippets
+				suggestions = snippets.map(snippet => new SnippetSuggestion(snippet, 0));
 
-		// dismbiguate suggestions with same labels
-		let lastItem: SnippetSuggestion;
-		for (const item of suggestions.sort(SnippetSuggestion.compareByLabel)) {
-			if (lastItem && lastItem.label === item.label) {
-				// use the disambiguateLabel instead of the actual label
-				lastItem.label = localize('snippetSuggest.longLabel', "{0}, {1}", lastItem.label, lastItem.snippet.name);
-				item.label = localize('snippetSuggest.longLabel', "{0}, {1}", item.label, item.snippet.name);
+			} else {
+				let consumed = new Set<Snippet>();
+				suggestions = [];
+				for (const start of lineOffsets) {
+					for (const snippet of snippets) {
+						if (!consumed.has(snippet) && matches(linePrefixLow, start, snippet.prefixLow, 0)) {
+							suggestions.push(new SnippetSuggestion(snippet, linePrefixLow.length - start));
+							consumed.add(snippet);
+						}
+					}
+				}
 			}
-			lastItem = item;
-		}
 
-		return { suggestions };
+			// dismbiguate suggestions with same labels
+			suggestions.sort(SnippetSuggestion.compareByLabel);
+
+			for (let i = 0; i < suggestions.length; i++) {
+				let item = suggestions[i];
+				let to = i + 1;
+				for (; to < suggestions.length && item.label === suggestions[to].label; to++) {
+					suggestions[to].label = localize('snippetSuggest.longLabel', "{0}, {1}", suggestions[to].label, suggestions[to].snippet.name);
+				}
+				if (to > i + 1) {
+					suggestions[i].label = localize('snippetSuggest.longLabel', "{0}, {1}", suggestions[i].label, suggestions[i].snippet.name);
+					i = to;
+				}
+			}
+			return { suggestions };
+		});
 	}
 
-	resolveCompletionItem?(model: IModel, position: Position, item: ISuggestion): ISuggestion {
+	resolveCompletionItem?(model: ITextModel, position: Position, item: ISuggestion): ISuggestion {
 		return (item instanceof SnippetSuggestion) ? item.resolve() : item;
 	}
 
-	private _getLanguageIdAtPosition(model: IModel, position: Position): LanguageId {
+	private _getLanguageIdAtPosition(model: ITextModel, position: Position): LanguageId {
 		// validate the `languageId` to ensure this is a user
 		// facing language with a name and the chance to have
 		// snippets, else fall back to the outer language
@@ -352,8 +401,16 @@ export class SnippetSuggestProvider implements ISuggestSupport {
 		}
 		return languageId;
 	}
+}
 
-
+function matches(pattern: string, patternStart: number, word: string, wordStart: number): boolean {
+	while (patternStart < pattern.length && wordStart < word.length) {
+		if (pattern[patternStart] === word[wordStart]) {
+			patternStart += 1;
+		}
+		wordStart += 1;
+	}
+	return patternStart === pattern.length;
 }
 
 export function getNonWhitespacePrefix(model: ISimpleModel, position: Position): string {
@@ -379,4 +436,3 @@ export function getNonWhitespacePrefix(model: ISimpleModel, position: Position):
 
 	return '';
 }
-

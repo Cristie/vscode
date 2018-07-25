@@ -69,6 +69,7 @@ interface Asset {
 	hash: string;
 	sha256hash: string;
 	size: number;
+	supportsFastUpdate?: boolean;
 }
 
 function createOrUpdate(commit: string, quality: string, platform: string, type: string, release: NewDocument, asset: Asset, isUpdate: boolean): Promise<void> {
@@ -157,7 +158,7 @@ async function publish(commit: string, quality: string, platform: string, type: 
 
 	console.log('Publishing...');
 	console.log('Quality:', quality);
-	console.log('Platforn:', platform);
+	console.log('Platform:', platform);
 	console.log('Type:', type);
 	console.log('Name:', name);
 	console.log('Version:', version);
@@ -233,6 +234,13 @@ async function publish(commit: string, quality: string, platform: string, type: 
 		sha256hash,
 		size
 	};
+
+	// Remove this if we ever need to rollback fast updates for windows
+	if (/win32/.test(platform)) {
+		asset.supportsFastUpdate = true;
+	}
+
+	console.log('Asset:', JSON.stringify(asset, null, '  '));
 
 	const release = {
 		id: commit,

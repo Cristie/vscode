@@ -4,115 +4,124 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
+import { Emitter, Event } from 'vs/base/common/event';
+import { IDisposable, dispose, toDisposable } from 'vs/base/common/lifecycle';
 import URI from 'vs/base/common/uri';
 import { TPromise } from 'vs/base/common/winjs.base';
-import { ExtHostContext, MainContext, IExtHostContext, MainThreadFileSystemShape, ExtHostFileSystemShape } from '../node/extHost.protocol';
-import { IFileService, IFileSystemProvider, IStat, IFileChange } from 'vs/platform/files/common/files';
-import { IDisposable, dispose } from 'vs/base/common/lifecycle';
-import Event, { Emitter } from 'vs/base/common/event';
+import { FileWriteOptions, FileSystemProviderCapabilities, IFileChange, IFileService, IFileSystemProvider, IStat, IWatchOptions, FileType, FileOverwriteOptions, FileDeleteOptions } from 'vs/platform/files/common/files';
 import { extHostNamedCustomer } from 'vs/workbench/api/electron-browser/extHostCustomers';
-import { IProgress } from 'vs/platform/progress/common/progress';
-import { IWorkspaceEditingService } from 'vs/workbench/services/workspace/common/workspaceEditing';
+import { ExtHostContext, ExtHostFileSystemShape, IExtHostContext, IFileChangeDto, MainContext, MainThreadFileSystemShape } from '../node/extHost.protocol';
 
 @extHostNamedCustomer(MainContext.MainThreadFileSystem)
 export class MainThreadFileSystem implements MainThreadFileSystemShape {
 
-	private readonly _toDispose: IDisposable[] = [];
 	private readonly _proxy: ExtHostFileSystemShape;
-	private readonly _provider = new Map<number, RemoteFileSystemProvider>();
+	private readonly _fileProvider = new Map<number, RemoteFileSystemProvider>();
 
 	constructor(
 		extHostContext: IExtHostContext,
-		@IFileService private readonly _fileService: IFileService,
-		@IWorkspaceEditingService private readonly _workspaceEditService: IWorkspaceEditingService
+		@IFileService private readonly _fileService: IFileService
 	) {
-		this._proxy = extHostContext.get(ExtHostContext.ExtHostFileSystem);
+		this._proxy = extHostContext.getProxy(ExtHostContext.ExtHostFileSystem);
 	}
 
 	dispose(): void {
-		dispose(this._toDispose);
+		this._fileProvider.forEach(value => value.dispose());
+		this._fileProvider.clear();
 	}
 
-	$registerFileSystemProvider(handle: number, scheme: string): void {
-		this._provider.set(handle, new RemoteFileSystemProvider(this._fileService, scheme, handle, this._proxy));
+	$registerFileSystemProvider(handle: number, scheme: string, capabilities: FileSystemProviderCapabilities): void {
+		this._fileProvider.set(handle, new RemoteFileSystemProvider(this._fileService, scheme, capabilities, handle, this._proxy));
 	}
 
-	$unregisterFileSystemProvider(handle: number): void {
-		dispose(this._provider.get(handle));
-		this._provider.delete(handle);
+	$unregisterProvider(handle: number): void {
+		dispose(this._fileProvider.get(handle));
+		this._fileProvider.delete(handle);
 	}
 
-	$onDidAddFileSystemRoot(uri: URI): void {
-		this._workspaceEditService.addFolders([uri]);
-	}
-
-	$onFileSystemChange(handle: number, changes: IFileChange[]): void {
-		this._provider.get(handle).$onFileSystemChange(changes);
-	}
-
-	$reportFileChunk(handle: number, resource: URI, chunk: number[]): void {
-		this._provider.get(handle).reportFileChunk(resource, chunk);
+	$onFileSystemChange(handle: number, changes: IFileChangeDto[]): void {
+		this._fileProvider.get(handle).$onFileSystemChange(changes);
 	}
 }
 
 class RemoteFileSystemProvider implements IFileSystemProvider {
 
 	private readonly _onDidChange = new Emitter<IFileChange[]>();
-	private readonly _registration: IDisposable;
-	private readonly _reads = new Map<string, IProgress<Uint8Array>>();
+	private readonly _registrations: IDisposable[];
 
-	readonly onDidChange: Event<IFileChange[]> = this._onDidChange.event;
-
+	readonly onDidChangeFile: Event<IFileChange[]> = this._onDidChange.event;
+	readonly capabilities: FileSystemProviderCapabilities;
 
 	constructor(
-		service: IFileService,
+		fileService: IFileService,
 		scheme: string,
+		capabilities: FileSystemProviderCapabilities,
 		private readonly _handle: number,
 		private readonly _proxy: ExtHostFileSystemShape
 	) {
-		this._registration = service.registerProvider(scheme, this);
+		this.capabilities = capabilities;
+		this._registrations = [fileService.registerProvider(scheme, this)];
 	}
 
 	dispose(): void {
-		this._registration.dispose();
+		dispose(this._registrations);
 		this._onDidChange.dispose();
 	}
 
-	$onFileSystemChange(changes: IFileChange[]): void {
-		this._onDidChange.fire(changes);
+	watch(resource: URI, opts: IWatchOptions) {
+		const session = Math.random();
+		this._proxy.$watch(this._handle, session, resource, opts);
+		return toDisposable(() => {
+			this._proxy.$unwatch(this._handle, session);
+		});
+	}
+
+	$onFileSystemChange(changes: IFileChangeDto[]): void {
+		this._onDidChange.fire(changes.map(RemoteFileSystemProvider._createFileChange));
+	}
+
+	private static _createFileChange(dto: IFileChangeDto): IFileChange {
+		return { resource: URI.revive(dto.resource), type: dto.type };
 	}
 
 	// --- forwarding calls
 
-	utimes(resource: URI, mtime: number, atime: number): TPromise<IStat, any> {
-		return this._proxy.$utimes(this._handle, resource, mtime, atime);
+	stat(resource: URI): TPromise<IStat> {
+		return this._proxy.$stat(this._handle, resource).then(undefined, err => {
+			throw err;
+		});
 	}
-	stat(resource: URI): TPromise<IStat, any> {
-		return this._proxy.$stat(this._handle, resource);
+
+	readFile(resource: URI): TPromise<Uint8Array, any> {
+		return this._proxy.$readFile(this._handle, resource).then(encoded => {
+			return Buffer.from(encoded, 'base64');
+		});
 	}
-	read(resource: URI, offset: number, count: number, progress: IProgress<Uint8Array>): TPromise<number, any> {
-		this._reads.set(resource.toString(), progress);
-		return this._proxy.$read(this._handle, offset, count, resource);
+
+	writeFile(resource: URI, content: Uint8Array, opts: FileWriteOptions): TPromise<void, any> {
+		let encoded = Buffer.isBuffer(content)
+			? content.toString('base64')
+			: Buffer.from(content.buffer, content.byteOffset, content.byteLength).toString('base64');
+		return this._proxy.$writeFile(this._handle, resource, encoded, opts);
 	}
-	reportFileChunk(resource: URI, chunk: number[]): void {
-		this._reads.get(resource.toString()).report(Buffer.from(chunk));
+
+	delete(resource: URI, opts: FileDeleteOptions): TPromise<void, any> {
+		return this._proxy.$delete(this._handle, resource, opts);
 	}
-	write(resource: URI, content: Uint8Array): TPromise<void, any> {
-		return this._proxy.$write(this._handle, resource, [].slice.call(content));
-	}
-	unlink(resource: URI): TPromise<void, any> {
-		return this._proxy.$unlink(this._handle, resource);
-	}
-	move(resource: URI, target: URI): TPromise<IStat, any> {
-		return this._proxy.$move(this._handle, resource, target);
-	}
-	mkdir(resource: URI): TPromise<IStat, any> {
+
+	mkdir(resource: URI): TPromise<void, any> {
 		return this._proxy.$mkdir(this._handle, resource);
 	}
-	readdir(resource: URI): TPromise<[URI, IStat][], any> {
+
+	readdir(resource: URI): TPromise<[string, FileType][], any> {
 		return this._proxy.$readdir(this._handle, resource);
 	}
-	rmdir(resource: URI): TPromise<void, any> {
-		return this._proxy.$rmdir(this._handle, resource);
+
+	rename(resource: URI, target: URI, opts: FileOverwriteOptions): TPromise<void, any> {
+		return this._proxy.$rename(this._handle, resource, target, opts);
+	}
+
+	copy(resource: URI, target: URI, opts: FileOverwriteOptions): TPromise<void, any> {
+		return this._proxy.$copy(this._handle, resource, target, opts);
 	}
 }

@@ -20,11 +20,12 @@ class CheckoutStatusBar {
 	private disposables: Disposable[] = [];
 
 	constructor(private repository: Repository) {
-		repository.onDidChangeStatus(this._onDidChange.fire, this._onDidChange, this.disposables);
+		repository.onDidRunGitStatus(this._onDidChange.fire, this._onDidChange, this.disposables);
 	}
 
 	get command(): Command | undefined {
-		const title = `$(git-branch) ${this.repository.headLabel}`;
+		const rebasing = !!this.repository.rebaseCommit;
+		const title = `$(git-branch) ${this.repository.headLabel}${rebasing ? ` (${localize('rebasing', 'Rebasing')})` : ''}`;
 
 		return {
 			command: 'git.checkout',
@@ -65,16 +66,17 @@ class SyncStatusBar {
 	}
 
 	constructor(private repository: Repository) {
-		repository.onDidChangeStatus(this.onModelChange, this, this.disposables);
+		repository.onDidRunGitStatus(this.onModelChange, this, this.disposables);
 		repository.onDidChangeOperations(this.onOperationsChange, this, this.disposables);
 		this._onDidChange.fire();
 	}
 
 	private onOperationsChange(): void {
-		this.state = {
-			...this.state,
-			isSyncRunning: this.repository.operations.isRunning(Operation.Sync)
-		};
+		const isSyncRunning = this.repository.operations.isRunning(Operation.Sync) ||
+			this.repository.operations.isRunning(Operation.Push) ||
+			this.repository.operations.isRunning(Operation.Pull);
+
+		this.state = { ...this.state, isSyncRunning };
 	}
 
 	private onModelChange(): void {

@@ -6,7 +6,7 @@
 
 import { TPromise } from 'vs/base/common/winjs.base';
 import { createDecorator, ServiceIdentifier } from 'vs/platform/instantiation/common/instantiation';
-import Event from 'vs/base/common/event';
+import { Event } from 'vs/base/common/event';
 
 export enum Parts {
 	ACTIVITYBAR_PART,
@@ -14,16 +14,24 @@ export enum Parts {
 	PANEL_PART,
 	EDITOR_PART,
 	STATUSBAR_PART,
-	TITLEBAR_PART
+	TITLEBAR_PART,
+	MENUBAR_PART
 }
 
 export enum Position {
 	LEFT,
-	RIGHT
+	RIGHT,
+	BOTTOM
 }
 
 export interface ILayoutOptions {
 	toggleMaximizedPanel?: boolean;
+	source?: Parts;
+}
+
+export interface IDimension {
+	readonly width: number;
+	readonly height: number;
 }
 
 export const IPartService = createDecorator<IPartService>('partService');
@@ -37,9 +45,14 @@ export interface IPartService {
 	onTitleBarVisibilityChange: Event<void>;
 
 	/**
+	 * Emits when the visibility of the menubar changes.
+	 */
+	onMenubarVisibilityChange: Event<IDimension>;
+
+	/**
 	 * Emits when the editor part's layout changes.
 	 */
-	onEditorLayout: Event<void>;
+	onEditorLayout: Event<IDimension>;
 
 	/**
 	 * Asks the part service to layout all parts.
@@ -50,11 +63,6 @@ export interface IPartService {
 	 * Asks the part service to if all parts have been created.
 	 */
 	isCreated(): boolean;
-
-	/**
-	 * Promise is complete when all parts have been created.
-	 */
-	joinCreation(): TPromise<boolean>;
 
 	/**
 	 * Returns whether the given part has the keyboard focus or not.
@@ -108,6 +116,16 @@ export interface IPartService {
 	getSideBarPosition(): Position;
 
 	/**
+	 * Gets the current panel position. Note that the panel can be hidden too.
+	 */
+	getPanelPosition(): Position;
+
+	/**
+	 * Sets the panel position.
+	 */
+	setPanelPosition(position: Position): TPromise<void>;
+
+	/**
 	 * Returns the identifier of the element that contains the workbench.
 	 */
 	getWorkbenchElementId(): string;
@@ -116,6 +134,16 @@ export interface IPartService {
 	 * Toggles the workbench in and out of zen mode - parts get hidden and window goes fullscreen.
 	 */
 	toggleZenMode(): void;
+
+	/**
+	 * Returns whether the centered editor layout is active.
+	 */
+	isEditorLayoutCentered(): boolean;
+
+	/**
+	 * Sets the workbench in and out of centered editor layout.
+	 */
+	centerEditorLayout(active: boolean): void;
 
 	/**
 	 * Resizes currently focused part on main access

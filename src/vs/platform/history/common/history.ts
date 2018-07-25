@@ -6,7 +6,7 @@
 'use strict';
 
 import { IPath } from 'vs/platform/windows/common/windows';
-import CommonEvent from 'vs/base/common/event';
+import { Event as CommonEvent } from 'vs/base/common/event';
 import { createDecorator } from 'vs/platform/instantiation/common/instantiation';
 import { IWorkspaceIdentifier, ISingleFolderWorkspaceIdentifier } from 'vs/platform/workspaces/common/workspaces';
 
@@ -24,7 +24,7 @@ export interface IHistoryMainService {
 
 	addRecentlyOpened(workspaces: (IWorkspaceIdentifier | ISingleFolderWorkspaceIdentifier)[], files: string[]): void;
 	getRecentlyOpened(currentWorkspace?: IWorkspaceIdentifier | ISingleFolderWorkspaceIdentifier, currentFiles?: IPath[]): IRecentlyOpened;
-	removeFromRecentlyOpened(paths: string[]): void;
+	removeFromRecentlyOpened(paths: (IWorkspaceIdentifier | ISingleFolderWorkspaceIdentifier | string)[]): void;
 	clearRecentlyOpened(): void;
 
 	updateWindowsJumpList(): void;

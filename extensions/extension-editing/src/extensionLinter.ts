@@ -3,19 +3,18 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import * as fs from 'fs';
 import * as path from 'path';
 
-import { parseTree, findNodeAtLocation, Node as JsonNode } from 'jsonc-parser';
 import * as nls from 'vscode-nls';
+const localize = nls.loadMessageBundle();
+
+import { parseTree, findNodeAtLocation, Node as JsonNode } from 'jsonc-parser';
 import * as MarkdownItType from 'markdown-it';
 
-import { languages, workspace, Disposable, ExtensionContext, TextDocument, Uri, Diagnostic, Range, DiagnosticSeverity, Position } from 'vscode';
+import { languages, workspace, Disposable, TextDocument, Uri, Diagnostic, Range, DiagnosticSeverity, Position } from 'vscode';
 
 const product = require('../../../product.json');
 const allowedBadgeProviders: string[] = (product.extensionAllowedBadgeProviders || []).map(s => s.toLowerCase());
-
-const localize = nls.loadMessageBundle();
 
 const httpsRequired = localize('httpsRequired', "Images must use the HTTPS protocol.");
 const svgsNotValid = localize('svgsNotValid', "SVGs are not a valid image source.");
@@ -54,7 +53,7 @@ export class ExtensionLinter {
 	private timer: NodeJS.Timer;
 	private markdownIt: MarkdownItType.MarkdownIt;
 
-	constructor(private context: ExtensionContext) {
+	constructor() {
 		this.disposables.push(
 			workspace.onDidOpenTextDocument(document => this.queue(document)),
 			workspace.onDidChangeTextDocument(event => this.queue(event.document)),
@@ -227,7 +226,7 @@ export class ExtensionLinter {
 			}
 
 			this.diagnosticsCollection.set(document.uri, diagnostics);
-		};
+		}
 	}
 
 	private locateToken(text: string, begin: number, end: number, token: MarkdownItType.Token, content: string) {
@@ -265,12 +264,12 @@ export class ExtensionLinter {
 
 	private async loadPackageJson(folder: Uri) {
 		const file = folder.with({ path: path.posix.join(folder.path, 'package.json') });
-		const exists = await fileExists(file.fsPath);
-		if (!exists) {
+		try {
+			const document = await workspace.openTextDocument(file);
+			return parseTree(document.getText());
+		} catch (err) {
 			return undefined;
 		}
-		const document = await workspace.openTextDocument(file);
-		return parseTree(document.getText());
 	}
 
 	private packageJsonChanged(folder: Uri) {
@@ -336,20 +335,6 @@ function endsWith(haystack: string, needle: string): boolean {
 	} else {
 		return false;
 	}
-}
-
-function fileExists(path: string): Promise<boolean> {
-	return new Promise((resolve, reject) => {
-		fs.lstat(path, (err, stats) => {
-			if (!err) {
-				resolve(true);
-			} else if (err.code === 'ENOENT') {
-				resolve(false);
-			} else {
-				reject(err);
-			}
-		});
-	});
 }
 
 function parseUri(src: string) {

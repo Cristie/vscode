@@ -8,9 +8,9 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as cp from 'child_process';
 import * as vscode from 'vscode';
-import * as nls from 'vscode-nls';
 
-const localize = nls.config(process.env.VSCODE_NLS_CONFIG)();
+import * as nls from 'vscode-nls';
+const localize = nls.loadMessageBundle();
 
 type AutoDetect = 'on' | 'off';
 
@@ -68,7 +68,7 @@ interface GulpTaskDefinition extends vscode.TaskDefinition {
 
 class FolderDetector {
 
-	private fileWatcher: vscode.FileSystemWatcher;
+	private fileWatcher: vscode.FileSystemWatcher | undefined;
 	private promise: Thenable<vscode.Task[]> | undefined;
 
 	constructor(private _workspaceFolder: vscode.WorkspaceFolder) {
@@ -83,7 +83,7 @@ class FolderDetector {
 	}
 
 	public start(): void {
-		let pattern = path.join(this._workspaceFolder.uri.fsPath, 'gulpfile{.babel.js,.js}');
+		let pattern = path.join(this._workspaceFolder.uri.fsPath, 'gulpfile{.babel.js,.js,.ts}');
 		this.fileWatcher = vscode.workspace.createFileSystemWatcher(pattern);
 		this.fileWatcher.onDidChange(() => this.promise = undefined);
 		this.fileWatcher.onDidCreate(() => this.promise = undefined);

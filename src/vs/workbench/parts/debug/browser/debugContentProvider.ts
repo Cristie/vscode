@@ -7,12 +7,13 @@ import uri from 'vs/base/common/uri';
 import { localize } from 'vs/nls';
 import { TPromise } from 'vs/base/common/winjs.base';
 import { guessMimeTypes, MIME_TEXT } from 'vs/base/common/mime';
-import { IModel } from 'vs/editor/common/editorCommon';
+import { ITextModel } from 'vs/editor/common/model';
 import { IModelService } from 'vs/editor/common/services/modelService';
 import { IModeService } from 'vs/editor/common/services/modeService';
 import { ITextModelService, ITextModelContentProvider } from 'vs/editor/common/services/resolverService';
 import { IWorkbenchContribution } from 'vs/workbench/common/contributions';
-import { DEBUG_SCHEME, IDebugService, IProcess } from 'vs/workbench/parts/debug/common/debug';
+import { DEBUG_SCHEME, IDebugService, ISession } from 'vs/workbench/parts/debug/common/debug';
+import { Source } from 'vs/workbench/parts/debug/common/debugSource';
 
 /**
  * Debug URI format
@@ -22,7 +23,7 @@ import { DEBUG_SCHEME, IDebugService, IProcess } from 'vs/workbench/parts/debug/
  *       debug:arbitrary_path?session=123e4567-e89b-12d3-a456-426655440000&ref=1016
  *       \___/ \____________/ \__________________________________________/ \______/
  *         |          |                             |                          |
- *      scheme   source.path                    session id            source.referencequery
+ *      scheme   source.path                    session id            source.reference
  *
  * the arbitrary_path and the session id are encoded with 'encodeURIComponent'
  *
@@ -38,41 +39,26 @@ export class DebugContentProvider implements IWorkbenchContribution, ITextModelC
 		textModelResolverService.registerTextModelContentProvider(DEBUG_SCHEME, this);
 	}
 
-	public getId(): string {
-		return 'debug.contentprovider';
-	}
+	public provideTextContent(resource: uri): TPromise<ITextModel> {
 
-	public provideTextContent(resource: uri): TPromise<IModel> {
-
-		let process: IProcess;
+		let session: ISession;
 		let sourceRef: number;
 
 		if (resource.query) {
-			const keyvalues = resource.query.split('&');
-			for (let keyvalue of keyvalues) {
-				const pair = keyvalue.split('=');
-				if (pair.length === 2) {
-					switch (pair[0]) {
-						case 'session':
-							process = this.debugService.findProcessByUUID(decodeURIComponent(pair[1]));
-							break;
-						case 'ref':
-							sourceRef = parseInt(pair[1]);
-							break;
-					}
-				}
-			}
+			const data = Source.getEncodedDebugData(resource);
+			session = this.debugService.getModel().getSessions().filter(p => p.getId() === data.sessionId).pop();
+			sourceRef = data.sourceReference;
 		}
 
-		if (!process) {
-			// fallback: use focused process
-			process = this.debugService.getViewModel().focusedProcess;
+		if (!session) {
+			// fallback: use focused session
+			session = this.debugService.getViewModel().focusedSession;
 		}
 
-		if (!process) {
-			return TPromise.wrapError<IModel>(new Error(localize('unable', "Unable to resolve the resource without a debug session")));
+		if (!session) {
+			return TPromise.wrapError<ITextModel>(new Error(localize('unable', "Unable to resolve the resource without a debug session")));
 		}
-		const source = process.sources.get(resource.toString());
+		const source = session.getSourceForUri(resource);
 		let rawSource: DebugProtocol.Source;
 		if (source) {
 			rawSource = source.raw;
@@ -87,20 +73,24 @@ export class DebugContentProvider implements IWorkbenchContribution, ITextModelC
 			};
 		}
 
-		return process.session.source({ sourceReference: sourceRef, source: rawSource }).then(response => {
+		const createErrModel = (message: string) => {
+			this.debugService.sourceIsNotAvailable(resource);
+			const modePromise = this.modeService.getOrCreateMode(MIME_TEXT);
+			const model = this.modelService.createModel(message, modePromise, resource);
+
+			return model;
+		};
+
+		return session.raw.source({ sourceReference: sourceRef, source: rawSource }).then(response => {
+			if (!response) {
+				return createErrModel(localize('canNotResolveSource', "Could not resolve resource {0}, no response from debug extension.", resource.toString()));
+			}
 
 			const mime = response.body.mimeType || guessMimeTypes(resource.path)[0];
 			const modePromise = this.modeService.getOrCreateMode(mime);
 			const model = this.modelService.createModel(response.body.content, modePromise, resource);
 
 			return model;
-		}, (err: DebugProtocol.ErrorResponse) => {
-
-			this.debugService.sourceIsNotAvailable(resource);
-			const modePromise = this.modeService.getOrCreateMode(MIME_TEXT);
-			const model = this.modelService.createModel(err.message, modePromise, resource);
-
-			return model;
-		});
+		}, (err: DebugProtocol.ErrorResponse) => createErrModel(err.message));
 	}
 }

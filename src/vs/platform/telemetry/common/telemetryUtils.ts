@@ -7,21 +7,21 @@
 import { TPromise } from 'vs/base/common/winjs.base';
 import { IDisposable } from 'vs/base/common/lifecycle';
 import { guessMimeTypes } from 'vs/base/common/mime';
-import paths = require('vs/base/common/paths');
+import * as paths from 'vs/base/common/paths';
 import URI from 'vs/base/common/uri';
-import { ConfigurationSource, IConfigurationService } from 'vs/platform/configuration/common/configuration';
+import { IConfigurationService, ConfigurationTarget } from 'vs/platform/configuration/common/configuration';
 import { IKeybindingService, KeybindingSource } from 'vs/platform/keybinding/common/keybinding';
-import { ILifecycleService, ShutdownReason } from 'vs/platform/lifecycle/common/lifecycle';
 import { ITelemetryService, ITelemetryInfo, ITelemetryData } from 'vs/platform/telemetry/common/telemetry';
+import { ILogService } from 'vs/platform/log/common/log';
 
-export const NullTelemetryService = {
-	_serviceBrand: undefined,
+export const NullTelemetryService = new class implements ITelemetryService {
+	_serviceBrand: undefined;
 	publicLog(eventName: string, data?: ITelemetryData) {
-		return TPromise.as<void>(null);
-	},
-	isOptedIn: true,
+		return TPromise.wrap<void>(null);
+	}
+	isOptedIn: true;
 	getTelemetryInfo(): TPromise<ITelemetryInfo> {
-		return TPromise.as({
+		return TPromise.wrap({
 			instanceId: 'someValue.instanceId',
 			sessionId: 'someValue.sessionId',
 			machineId: 'someValue.machineId'
@@ -31,46 +31,44 @@ export const NullTelemetryService = {
 
 export interface ITelemetryAppender {
 	log(eventName: string, data: any): void;
+	dispose(): TPromise<any>;
 }
 
 export function combinedAppender(...appenders: ITelemetryAppender[]): ITelemetryAppender {
-	return { log: (e, d) => appenders.forEach(a => a.log(e, d)) };
+	return {
+		log: (e, d) => appenders.forEach(a => a.log(e, d)),
+		dispose: () => TPromise.join(appenders.map(a => a.dispose()))
+	};
 }
 
-export const NullAppender: ITelemetryAppender = { log: () => null };
+export const NullAppender: ITelemetryAppender = { log: () => null, dispose: () => TPromise.as(null) };
 
-// --- util
 
-export function anonymize(input: string): string {
-	if (!input) {
-		return input;
+export class LogAppender implements ITelemetryAppender {
+
+	private commonPropertiesRegex = /^sessionID$|^version$|^timestamp$|^commitHash$|^common\./;
+	constructor(@ILogService private readonly _logService: ILogService) { }
+
+	dispose(): TPromise<any> {
+		return TPromise.as(undefined);
 	}
 
-	let r = '';
-	for (let i = 0; i < input.length; i++) {
-		let ch = input[i];
-		if (ch >= '0' && ch <= '9') {
-			r += '0';
-			continue;
-		}
-		if (ch >= 'a' && ch <= 'z') {
-			r += 'a';
-			continue;
-		}
-		if (ch >= 'A' && ch <= 'Z') {
-			r += 'A';
-			continue;
-		}
-		r += ch;
+	log(eventName: string, data: any): void {
+		const strippedData = {};
+		Object.keys(data).forEach(key => {
+			if (!this.commonPropertiesRegex.test(key)) {
+				strippedData[key] = data[key];
+			}
+		});
+		this._logService.trace(`telemetry/${eventName}`, strippedData);
 	}
-	return r;
 }
 
 /* __GDPR__FRAGMENT__
 	"URIDescriptor" : {
 		"mimeType" : { "classification": "SystemMetaData", "purpose": "FeatureInsight" },
 		"ext": { "classification": "SystemMetaData", "purpose": "FeatureInsight" },
-		"path": { "classification": "CustomerContent", "purpose": "FeatureInsight" }
+		"path": { "classification": "SystemMetaData", "purpose": "FeatureInsight" }
 	}
 */
 export interface URIDescriptor {
@@ -79,9 +77,9 @@ export interface URIDescriptor {
 	path?: string;
 }
 
-export function telemetryURIDescriptor(uri: URI): URIDescriptor {
+export function telemetryURIDescriptor(uri: URI, hashPath: (path: string) => string): URIDescriptor {
 	const fsPath = uri && uri.fsPath;
-	return fsPath ? { mimeType: guessMimeTypes(fsPath).join(', '), ext: paths.extname(fsPath), path: anonymize(fsPath) } : {};
+	return fsPath ? { mimeType: guessMimeTypes(fsPath).join(', '), ext: paths.extname(fsPath), path: hashPath(fsPath) } : {};
 }
 
 /**
@@ -103,6 +101,7 @@ const configurationValueWhitelist = [
 	'editor.roundedSelection',
 	'editor.scrollBeyondLastLine',
 	'editor.minimap.enabled',
+	'editor.minimap.side',
 	'editor.minimap.renderCharacters',
 	'editor.minimap.maxColumn',
 	'editor.find.seedSearchStringFromSelection',
@@ -125,6 +124,7 @@ const configurationValueWhitelist = [
 	'editor.snippetSuggestions',
 	'editor.emptySelectionClipboard',
 	'editor.wordBasedSuggestions',
+	'editor.suggestSelection',
 	'editor.suggestFontSize',
 	'editor.suggestLineHeight',
 	'editor.selectionHighlight',
@@ -152,41 +152,44 @@ const configurationValueWhitelist = [
 	'editor.formatOnSave',
 	'editor.colorDecorators',
 
-	'window.zoomLevel',
-	'files.autoSave',
-	'files.hotExit',
+	'breadcrumbs.enabled',
+	'breadcrumbs.filePath',
+	'breadcrumbs.symbolPath',
+	'breadcrumbs.useQuickPick',
+	'explorer.openEditors.visible',
+	'extensions.autoUpdate',
 	'files.associations',
-	'workbench.statusBar.visible',
+	'files.autoGuessEncoding',
+	'files.autoSave',
+	'files.autoSaveDelay',
+	'files.encoding',
+	'files.eol',
+	'files.hotExit',
 	'files.trimTrailingWhitespace',
 	'git.confirmSync',
-	'workbench.sideBar.location',
-	'window.openFilesInNewWindow',
-	'javascript.validate.enable',
-	'window.reopenFolders',
-	'window.restoreWindows',
-	'extensions.autoUpdate',
-	'files.eol',
-	'explorer.openEditors.visible',
-	'workbench.editor.enablePreview',
-	'files.autoSaveDelay',
-	'workbench.editor.showTabs',
-	'files.encoding',
-	'files.autoGuessEncoding',
 	'git.enabled',
 	'http.proxyStrictSSL',
-	'terminal.integrated.fontFamily',
-	'workbench.editor.enablePreviewFromQuickOpen',
-	'workbench.editor.swipeToNavigate',
+	'javascript.validate.enable',
 	'php.builtInCompletions.enable',
 	'php.validate.enable',
 	'php.validate.run',
-	'workbench.welcome.enabled',
+	'terminal.integrated.fontFamily',
+	'window.openFilesInNewWindow',
+	'window.restoreWindows',
+	'window.zoomLevel',
+	'workbench.editor.enablePreview',
+	'workbench.editor.enablePreviewFromQuickOpen',
+	'workbench.editor.showTabs',
+	'workbench.editor.swipeToNavigate',
+	'workbench.sideBar.location',
 	'workbench.startupEditor',
+	'workbench.statusBar.visible',
+	'workbench.welcome.enabled',
 ];
 
 export function configurationTelemetry(telemetryService: ITelemetryService, configurationService: IConfigurationService): IDisposable {
-	return configurationService.onDidUpdateConfiguration(event => {
-		if (event.source !== ConfigurationSource.Default) {
+	return configurationService.onDidChangeConfiguration(event => {
+		if (event.source !== ConfigurationTarget.DEFAULT) {
 			/* __GDPR__
 				"updateConfiguration" : {
 					"configurationSource" : { "classification": "SystemMetaData", "purpose": "FeatureInsight" },
@@ -194,7 +197,7 @@ export function configurationTelemetry(telemetryService: ITelemetryService, conf
 				}
 			*/
 			telemetryService.publicLog('updateConfiguration', {
-				configurationSource: ConfigurationSource[event.source],
+				configurationSource: ConfigurationTarget[event.source],
 				configurationKeys: flattenKeys(event.sourceConfig)
 			});
 			/* __GDPR__
@@ -204,21 +207,10 @@ export function configurationTelemetry(telemetryService: ITelemetryService, conf
 				}
 			*/
 			telemetryService.publicLog('updateConfigurationValues', {
-				configurationSource: ConfigurationSource[event.source],
+				configurationSource: ConfigurationTarget[event.source],
 				configurationValues: flattenValues(event.sourceConfig, configurationValueWhitelist)
 			});
 		}
-	});
-}
-
-export function lifecycleTelemetry(telemetryService: ITelemetryService, lifecycleService: ILifecycleService): IDisposable {
-	return lifecycleService.onShutdown(event => {
-		/* __GDPR__
-			"shutdown" : {
-				"reason" : { "classification": "SystemMetaData", "purpose": "FeatureInsight" }
-			}
-		*/
-		telemetryService.publicLog('shutdown', { reason: ShutdownReason[event] });
 	});
 }
 

@@ -10,19 +10,23 @@ import { SnippetSuggestProvider } from 'vs/workbench/parts/snippets/electron-bro
 import { Position } from 'vs/editor/common/core/position';
 import { ModesRegistry } from 'vs/editor/common/modes/modesRegistry';
 import { ModeServiceImpl } from 'vs/editor/common/services/modeServiceImpl';
-import { Model } from 'vs/editor/common/model/model';
-import { ISnippetsService, Snippet } from 'vs/workbench/parts/snippets/electron-browser/snippets.contribution';
-import { TPromise } from 'vs/base/common/winjs.base';
+import { TextModel } from 'vs/editor/common/model/textModel';
+import { ISnippetsService } from 'vs/workbench/parts/snippets/electron-browser/snippets.contribution';
+import { Snippet } from 'vs/workbench/parts/snippets/electron-browser/snippetsFile';
+import { SuggestContext, SuggestTriggerKind } from 'vs/editor/common/modes';
 
 class SimpleSnippetService implements ISnippetsService {
 	_serviceBrand: any;
 	constructor(readonly snippets: Snippet[]) {
 	}
 	getSnippets() {
-		return TPromise.as(this.getSnippetsSync());
+		return Promise.resolve(this.getSnippetsSync());
 	}
 	getSnippetsSync(): Snippet[] {
 		return this.snippets;
+	}
+	getSnippetFiles(): any {
+		throw new Error();
 	}
 }
 
@@ -37,121 +41,210 @@ suite('SnippetsService', function () {
 
 	let modeService: ModeServiceImpl;
 	let snippetService: ISnippetsService;
+	let suggestContext: SuggestContext = { triggerKind: SuggestTriggerKind.Invoke };
 
 	setup(function () {
 		modeService = new ModeServiceImpl();
-		snippetService = new SimpleSnippetService([{
-			prefix: 'bar',
-			codeSnippet: 'barCodeSnippet',
-			name: 'barTest',
-			description: '',
-			source: ''
-		}, {
-			prefix: 'bazz',
-			codeSnippet: 'bazzCodeSnippet',
-			name: 'bazzTest',
-			description: '',
-			source: ''
-		}]);
+		snippetService = new SimpleSnippetService([new Snippet(
+			['fooLang'],
+			'barTest',
+			'bar',
+			'',
+			'barCodeSnippet',
+			''
+		), new Snippet(
+			['fooLang'],
+			'bazzTest',
+			'bazz',
+			'',
+			'bazzCodeSnippet',
+			''
+		)]);
 	});
 
 
-	test('snippet completions - simple', async function () {
+	test('snippet completions - simple', function () {
 
 		const provider = new SnippetSuggestProvider(modeService, snippetService);
-		const model = Model.createFromString('', undefined, modeService.getLanguageIdentifier('fooLang'));
+		const model = TextModel.createFromString('', undefined, modeService.getLanguageIdentifier('fooLang'));
 
-		const result = await provider.provideCompletionItems(model, new Position(1, 1));
-
-		assert.equal(result.incomplete, undefined);
-		assert.equal(result.suggestions.length, 2);
+		return provider.provideCompletionItems(model, new Position(1, 1), suggestContext).then(result => {
+			assert.equal(result.incomplete, undefined);
+			assert.equal(result.suggestions.length, 2);
+		});
 	});
 
-	test('snippet completions - with prefix', async function () {
+	test('snippet completions - with prefix', function () {
 
 		const provider = new SnippetSuggestProvider(modeService, snippetService);
-		const model = Model.createFromString('bar', undefined, modeService.getLanguageIdentifier('fooLang'));
+		const model = TextModel.createFromString('bar', undefined, modeService.getLanguageIdentifier('fooLang'));
 
-		const result = await provider.provideCompletionItems(model, new Position(1, 4));
-
-		assert.equal(result.incomplete, undefined);
-		assert.equal(result.suggestions.length, 1);
-		assert.equal(result.suggestions[0].label, 'bar');
-		assert.equal(result.suggestions[0].insertText, 'barCodeSnippet');
+		return provider.provideCompletionItems(model, new Position(1, 4), suggestContext).then(result => {
+			assert.equal(result.incomplete, undefined);
+			assert.equal(result.suggestions.length, 1);
+			assert.equal(result.suggestions[0].label, 'bar');
+			assert.equal(result.suggestions[0].overwriteBefore, 3);
+			assert.equal(result.suggestions[0].insertText, 'barCodeSnippet');
+		});
 	});
 
-	test('Cannot use "<?php" as user snippet prefix anymore, #26275', async function () {
-		snippetService = new SimpleSnippetService([{
-			prefix: '<?php',
-			codeSnippet: 'insert me',
-			name: '',
-			description: '',
-			source: ''
-		}]);
+	test('snippet completions - with different prefixes', async function () {
+
+		snippetService = new SimpleSnippetService([new Snippet(
+			['fooLang'],
+			'barTest',
+			'bar',
+			'',
+			's1',
+			''
+		), new Snippet(
+			['fooLang'],
+			'name',
+			'bar-bar',
+			'',
+			's2',
+			''
+		)]);
 
 		const provider = new SnippetSuggestProvider(modeService, snippetService);
+		const model = TextModel.createFromString('bar-bar', undefined, modeService.getLanguageIdentifier('fooLang'));
 
-		let model = Model.createFromString('\t<?php', undefined, modeService.getLanguageIdentifier('fooLang'));
-		let result = await provider.provideCompletionItems(model, new Position(1, 7));
-		assert.equal(result.suggestions.length, 1);
-		model.dispose();
+		await provider.provideCompletionItems(model, new Position(1, 3), suggestContext).then(result => {
+			assert.equal(result.incomplete, undefined);
+			assert.equal(result.suggestions.length, 2);
+			assert.equal(result.suggestions[0].label, 'bar');
+			assert.equal(result.suggestions[0].insertText, 's1');
+			assert.equal(result.suggestions[0].overwriteBefore, 2);
+			assert.equal(result.suggestions[1].label, 'bar-bar');
+			assert.equal(result.suggestions[1].insertText, 's2');
+			assert.equal(result.suggestions[1].overwriteBefore, 2);
+		});
 
-		model = Model.createFromString('\t<?', undefined, modeService.getLanguageIdentifier('fooLang'));
-		result = await provider.provideCompletionItems(model, new Position(1, 4));
-		assert.equal(result.suggestions.length, 1);
-		model.dispose();
+		await provider.provideCompletionItems(model, new Position(1, 5), suggestContext).then(result => {
+			assert.equal(result.incomplete, undefined);
+			assert.equal(result.suggestions.length, 1);
+			assert.equal(result.suggestions[0].label, 'bar-bar');
+			assert.equal(result.suggestions[0].insertText, 's2');
+			assert.equal(result.suggestions[0].overwriteBefore, 4);
+		});
 
-		model = Model.createFromString('a<?', undefined, modeService.getLanguageIdentifier('fooLang'));
-		result = await provider.provideCompletionItems(model, new Position(1, 4));
-		assert.equal(result.suggestions.length, 0);
-		model.dispose();
+		await provider.provideCompletionItems(model, new Position(1, 6), suggestContext).then(result => {
+			assert.equal(result.incomplete, undefined);
+			assert.equal(result.suggestions.length, 2);
+			assert.equal(result.suggestions[0].label, 'bar');
+			assert.equal(result.suggestions[0].insertText, 's1');
+			assert.equal(result.suggestions[0].overwriteBefore, 1);
+			assert.equal(result.suggestions[1].label, 'bar-bar');
+			assert.equal(result.suggestions[1].insertText, 's2');
+			assert.equal(result.suggestions[1].overwriteBefore, 5);
+		});
 	});
 
-	test('No user snippets in suggestions, when inside the code, #30508', async function () {
-
-		snippetService = new SimpleSnippetService([{
-			prefix: 'foo',
-			codeSnippet: '<foo>$0</foo>',
-			name: '',
-			description: '',
-			source: ''
-		}]);
+	test('Cannot use "<?php" as user snippet prefix anymore, #26275', function () {
+		snippetService = new SimpleSnippetService([new Snippet(
+			['fooLang'],
+			'',
+			'<?php',
+			'',
+			'insert me',
+			''
+		)]);
 
 		const provider = new SnippetSuggestProvider(modeService, snippetService);
 
-		let model = Model.createFromString('<head>\n\t\n>/head>', undefined, modeService.getLanguageIdentifier('fooLang'));
-		let result = await provider.provideCompletionItems(model, new Position(1, 1));
-		assert.equal(result.suggestions.length, 1);
+		let model = TextModel.createFromString('\t<?php', undefined, modeService.getLanguageIdentifier('fooLang'));
+		return provider.provideCompletionItems(model, new Position(1, 7), suggestContext).then(result => {
+			assert.equal(result.suggestions.length, 1);
+			model.dispose();
 
-		result = await provider.provideCompletionItems(model, new Position(2, 2));
-		assert.equal(result.suggestions.length, 1);
+			model = TextModel.createFromString('\t<?', undefined, modeService.getLanguageIdentifier('fooLang'));
+			return provider.provideCompletionItems(model, new Position(1, 4), suggestContext);
+		}).then(result => {
+			assert.equal(result.suggestions.length, 1);
+			assert.equal(result.suggestions[0].overwriteBefore, 2);
+			model.dispose();
+
+			model = TextModel.createFromString('a<?', undefined, modeService.getLanguageIdentifier('fooLang'));
+			return provider.provideCompletionItems(model, new Position(1, 4), suggestContext);
+		}).then(result => {
+			assert.equal(result.suggestions.length, 1);
+			assert.equal(result.suggestions[0].overwriteBefore, 2);
+			model.dispose();
+		});
 	});
 
-	test('SnippetSuggest - ensure extension snippets come last ', async function () {
-		snippetService = new SimpleSnippetService([{
-			prefix: 'second',
-			codeSnippet: 'second',
-			name: 'second',
-			description: '',
-			source: '',
-			isFromExtension: true
-		}, {
-			prefix: 'first',
-			codeSnippet: 'first',
-			name: 'first',
-			description: '',
-			source: '',
-			isFromExtension: false
-		}]);
+	test('No user snippets in suggestions, when inside the code, #30508', function () {
+
+		snippetService = new SimpleSnippetService([new Snippet(
+			['fooLang'],
+			'',
+			'foo',
+			'',
+			'<foo>$0</foo>',
+			''
+		)]);
 
 		const provider = new SnippetSuggestProvider(modeService, snippetService);
 
-		let model = Model.createFromString('', undefined, modeService.getLanguageIdentifier('fooLang'));
-		let result = await provider.provideCompletionItems(model, new Position(1, 1));
-		assert.equal(result.suggestions.length, 2);
+		let model = TextModel.createFromString('<head>\n\t\n>/head>', undefined, modeService.getLanguageIdentifier('fooLang'));
+		return provider.provideCompletionItems(model, new Position(1, 1), suggestContext).then(result => {
+			assert.equal(result.suggestions.length, 1);
+			return provider.provideCompletionItems(model, new Position(2, 2), suggestContext);
+		}).then(result => {
+			assert.equal(result.suggestions.length, 1);
+		});
+	});
 
-		let [first, second] = result.suggestions;
-		assert.equal(first.label, 'first');
-		assert.equal(second.label, 'second');
+	test('SnippetSuggest - ensure extension snippets come last ', function () {
+		snippetService = new SimpleSnippetService([new Snippet(
+			['fooLang'],
+			'second',
+			'second',
+			'',
+			'second',
+			'',
+			true
+		), new Snippet(
+			['fooLang'],
+			'first',
+			'first',
+			'',
+			'first',
+			'',
+			false
+		)]);
+
+		const provider = new SnippetSuggestProvider(modeService, snippetService);
+
+		let model = TextModel.createFromString('', undefined, modeService.getLanguageIdentifier('fooLang'));
+		return provider.provideCompletionItems(model, new Position(1, 1), suggestContext).then(result => {
+			assert.equal(result.suggestions.length, 2);
+			let [first, second] = result.suggestions;
+			assert.equal(first.label, 'first');
+			assert.equal(second.label, 'second');
+		});
+	});
+
+	test('Dash in snippets prefix broken #53945', async function () {
+		snippetService = new SimpleSnippetService([new Snippet(
+			['fooLang'],
+			'p-a',
+			'p-a',
+			'',
+			'second',
+			''
+		)]);
+		const provider = new SnippetSuggestProvider(modeService, snippetService);
+
+		let model = TextModel.createFromString('p-', undefined, modeService.getLanguageIdentifier('fooLang'));
+
+		let result = await provider.provideCompletionItems(model, new Position(1, 2), suggestContext);
+		assert.equal(result.suggestions.length, 1);
+
+		result = await provider.provideCompletionItems(model, new Position(1, 3), suggestContext);
+		assert.equal(result.suggestions.length, 1);
+
+		result = await provider.provideCompletionItems(model, new Position(1, 3), { triggerCharacter: '-', triggerKind: SuggestTriggerKind.TriggerCharacter });
+		assert.equal(result.suggestions.length, 1);
 	});
 });
